@@ -34,7 +34,7 @@ app = Flask(__name__)
 # ============================================================
 # CONFIGURATION
 # ============================================================
-API_KEY = "your_api_key_here"
+API_KEY = "ANSHAFTAKZXKY"
 OWNER = "ANSH AFT"
 VERSION = "10.0 ULTIMATE"
 DOWNLOAD_DIR = "/tmp/downloads"
