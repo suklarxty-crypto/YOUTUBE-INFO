@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # ============================================================
-# ULTIMATE YOUTUBE API - SINGLE ENDPOINT
-# VIDEO + CHANNEL - SAB KUCH EK ENDPOINT MEIN
-# DOWNLOAD + CONVERT + FULL INFO
-# VERSION: 13.0 ULTIMATE
+# ULTIMATE YOUTUBE API - MAXIMUM INFO + DOWNLOAD + CONVERT
+# VERSION: 17.0 ULTIMATE
+# SAB KUCH HARDCODED - API KEY + SCRAPERAPI + COOKIES
 # ============================================================
 
 import os
@@ -11,9 +10,12 @@ import sys
 import json
 import base64
 import time
+import random
 import uuid
+import shutil
 import traceback
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 from functools import wraps
 
 from flask import Flask, jsonify, request, send_file
@@ -22,36 +24,93 @@ import yt_dlp
 app = Flask(__name__)
 
 # ============================================================
-# CONFIGURATION - HARDCODED
+# CONFIGURATION - HARDCODED (SAB KUCH ANDAR)
 # ============================================================
 API_KEY = "ANSHZKXXMP"
-OWNER = "ANSH AFT"
-VERSION = "13.0 ULTIMATE"
-
-# ScraperAPI
 SCRAPERAPI_KEY = "9c72d7d42c359e777211cf0b91ff0da2"
+OWNER = "ANSH AFT"
+VERSION = "17.0 ULTIMATE"
+
+# ScraperAPI Proxy
 PROXY_URL = f"http://scraperapi:{SCRAPERAPI_KEY}@proxy-server.scraperapi.com:8001"
 
-# YouTube Cookies (base64)
+# YouTube Cookies (base64 encoded)
 YOUTUBE_COOKIES_B64 = "IyBIVFRQIENvb2tpZSBGaWxlCiMgTmV0c2NhcGUgSFRUUCBDb29raWUgRmlsZQouZ29vZ2xlLmNvbQlUUklVCQkvCUZBTFNFCTE3OTM1NDQwMDAJLkFQSVMJRFRZUXY0b3hjbVhMaW02TS9BOF8yQ3RsZ0NJYnRFVGN0YwouZ29vZ2xlLmNvbQlUUklVCQkvCUZBTFNFCTE3OTM1NDQwMDAJLl9TZWN1cmUtMVBBUElTSUQJZ2EwMDBEQWxfSUlPcWVGcExtSzhROUQ1eGloeEs2YTJlMWxCdEdsOWhTYjBvTnNjLTNfN19ZTkNsUnVWR2hIeGtmd0psSTl1Y21RQUNnWUtBWUVTQVJNU0ZRSkdYMk1pRDFRLURqNzlfMlVJTkt0SjhLcGdyQm9WQVVGOHlLcGZjZXhhdGtoalpxMjJuUU50Vk9DcTAwNzYKLnlvdXR1YmUuY29tCVRSVUUJLwkRQUxTRQkxNzkzNTQ0MDAwCS5fU2VjdXJlLTFQU0lECWdhMDAwREFsX0lJT3FlRnBMbUs4UTlENXhpaHhLNmEyZTFNQnRHbDloU2Iwb05zYy0zXzdfWU5DbFJ1VkdoSHhrZndKbEk5dWNtUUFDUW9HQVlFU0FSTVNGUUhHWDJNaUQxUS1Eajc5XzJ1SU5LdEo4S3BnckJvVkFVRjh5S3BmY2V4YXRraGpacTIyblFOdFZPQ3EwMDc2Ci55b3V0dWJlLmNvbQlUUklVCQkvCUZBTFNFCTE3OTM1NDQwMDAJLl9TZWN1cmUtMVBTSUNDCUFLOGFUalZhbk1fd2x2dTB2M0s2TkQ2Ym1IajJWVEhMeldmeTFsbTFPRXI4dGRPQ0UtaWg2N2t6Sk1aVjV6bGlKWjdubnhoUQouZ29vZ2xlLmNvbQlUUklVCQkvCUZBTFNFCTE3OTM1NDQwMDAJLl9TZWN1cmUtMVBTSUNDCUFLOGFUalhrTEpXNHJmYTJMU3c5S0RwRlY4LXQ3N09ZNFQ1UHctdUZBNy1xSVZjYlZYdXFjd3RZOUNpRmtxaENXeFlqYXUtbTBB"
 
+# Download directory
 DOWNLOAD_DIR = "/tmp/downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 DOWNLOAD_STORE = {}
+RATE_LIMIT_STORE = {}
+RATE_LIMIT_SECONDS = 5
+RATE_LIMIT_MAX_REQUESTS = 10
+
+
+# ============================================================
+# FFMPEG CHECK
+# ============================================================
+def check_ffmpeg():
+    return shutil.which("ffmpeg") is not None
+
 
 # ============================================================
 # COOKIES
 # ============================================================
 def get_cookies_file():
+    if not YOUTUBE_COOKIES_B64:
+        return None
     try:
         cookies_data = base64.b64decode(YOUTUBE_COOKIES_B64)
         cookies_path = '/tmp/youtube_cookies.txt'
         with open(cookies_path, 'wb') as f:
             f.write(cookies_data)
         return cookies_path
-    except:
+    except Exception:
         return None
+
+
+# ============================================================
+# URL VALIDATION
+# ============================================================
+def is_youtube_url(url):
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        valid_hosts = {
+            "youtube.com", "www.youtube.com", "m.youtube.com",
+            "music.youtube.com", "youtu.be", "www.youtu.be",
+        }
+        return host in valid_hosts
+    except Exception:
+        return False
+
+
+# ============================================================
+# RATE LIMITING
+# ============================================================
+def check_rate_limit(client_ip):
+    now = time.time()
+    if client_ip not in RATE_LIMIT_STORE:
+        RATE_LIMIT_STORE[client_ip] = []
+    RATE_LIMIT_STORE[client_ip] = [
+        t for t in RATE_LIMIT_STORE[client_ip]
+        if now - t < RATE_LIMIT_SECONDS
+    ]
+    if len(RATE_LIMIT_STORE[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
+        return False
+    RATE_LIMIT_STORE[client_ip].append(now)
+    return True
+
+
+# ============================================================
+# EXPIRY
+# ============================================================
+def is_expired(expires_at):
+    try:
+        return datetime.now() >= datetime.fromisoformat(expires_at)
+    except Exception:
+        return True
 
 
 # ============================================================
@@ -59,63 +118,47 @@ def get_cookies_file():
 # ============================================================
 def build_ydl_opts(download=False, format_type=None, quality=None, output_template=None):
     opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'nocheckcertificate': True,
-        'geo_bypass': True,
-        'cachedir': False,
-        'no_color': True,
-        'socket_timeout': 60,
-        'retries': 10,
-        'fragment_retries': 10,
-        'extractor_retries': 5,
-        'proxy': PROXY_URL,
+        "quiet": True,
+        "no_warnings": True,
+        "nocheckcertificate": True,
+        "geo_bypass": True,
+        "cachedir": False,
+        "no_color": True,
+        "socket_timeout": 60,
+        "retries": 5,
+        "fragment_retries": 5,
+        "extractor_retries": 3,
     }
     
+    # Proxy
+    if PROXY_URL:
+        opts["proxy"] = PROXY_URL
+    
+    # Cookies
     cookies_file = get_cookies_file()
     if cookies_file:
-        opts['cookiefile'] = cookies_file
-        opts['extractor_args'] = {
-            'youtube': {
-                'player_client': ['web', 'android', 'ios', 'tv_embedded', 'mweb'],
-            }
-        }
-    else:
-        opts['extractor_args'] = {
-            'youtube': {
-                'player_client': ['android', 'ios', 'web_safari', 'tv_embedded'],
-                'player_skip': ['webpage', 'configs'],
-            }
-        }
-        opts['http_headers'] = {
-            'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
-        }
+        opts["cookiefile"] = cookies_file
     
+    # Download mode
     if download:
-        opts['outtmpl'] = output_template
-        opts['merge_output_format'] = 'mp4'
+        opts["outtmpl"] = output_template
         
         if format_type == "mp3":
-            opts['format'] = "bestaudio/best"
-            opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
+            opts["format"] = "bestaudio/best"
+            opts["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "320",
             }]
         else:
             if quality == "best":
-                opts['format'] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+                opts["format"] = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
             else:
-                height = quality.replace("p", "")
-                opts['format'] = f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}][ext=mp4]/best"
-            
-            opts['postprocessors'] = [{
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': 'mp4',
-            }]
+                height = int(quality.rstrip("p"))
+                opts["format"] = f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}][ext=mp4]/best"
+            opts["merge_output_format"] = "mp4"
     else:
-        opts['skip_download'] = True
-        opts['extract_flat'] = False
+        opts["skip_download"] = True
     
     return opts
 
@@ -152,7 +195,7 @@ def format_date(date_str):
     try:
         dt = datetime.strptime(date_str, "%Y%m%d")
         return dt.strftime("%d %B %Y")
-    except:
+    except Exception:
         return date_str
 
 
@@ -174,21 +217,20 @@ def format_number(num):
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        
-        if not api_key and request.is_json:
-            try:
-                data = request.get_json()
-                api_key = data.get('api_key') if data else None
-            except:
-                pass
-        
+        api_key = request.headers.get("X-API-Key")
         if not api_key:
-            return jsonify({"status": "error", "code": 401, "message": "API key required"}), 401
-        
+            return jsonify({
+                "status": "error",
+                "code": 401,
+                "message": "API key required",
+                "hint": "Use header: X-API-Key: ANSHZKXXMP"
+            }), 401
         if api_key != API_KEY:
-            return jsonify({"status": "error", "code": 403, "message": "Invalid API key"}), 403
-        
+            return jsonify({
+                "status": "error",
+                "code": 403,
+                "message": "Invalid API key"
+            }), 403
         return f(*args, **kwargs)
     return decorated
 
@@ -224,6 +266,7 @@ def get_channel_max_info(info):
         videos.append({
             "id": video_id,
             "title": entry.get("title"),
+            "fulltitle": entry.get("fulltitle"),
             "url": entry.get("url") or f"https://youtu.be/{video_id}",
             "short_url": f"https://youtu.be/{video_id}",
             "embed_url": f"https://www.youtube.com/embed/{video_id}",
@@ -254,36 +297,6 @@ def get_channel_max_info(info):
             "playlist_index": entry.get("playlist_index"),
         })
     
-    channel_basic = {
-        "name": info.get("channel") or info.get("uploader") or info.get("title"),
-        "handle": info.get("uploader_id"),
-        "id": info.get("channel_id") or info.get("id"),
-        "url": info.get("channel_url") or info.get("webpage_url"),
-        "description": info.get("description"),
-        "description_length": len(info.get("description", "") or ""),
-        "description_preview": (info.get("description", "") or "")[:1000],
-        "subscriber_count": info.get("channel_follower_count"),
-        "subscriber_count_formatted": format_number(info.get("channel_follower_count")),
-        "video_count": len(videos),
-        "thumbnail": info.get("thumbnail"),
-        "thumbnails": info.get("thumbnails", []),
-    }
-    
-    statistics = {
-        "total_videos": len(videos),
-        "total_duration_seconds": total_duration,
-        "total_duration_formatted": format_duration(total_duration),
-        "total_duration_hours": round(total_duration / 3600, 2),
-        "total_views": total_views,
-        "total_views_formatted": format_number(total_views),
-        "total_likes": total_likes,
-        "total_likes_formatted": format_number(total_likes),
-        "total_comments": total_comments,
-        "total_comments_formatted": format_number(total_comments),
-        "average_views_per_video": total_views // len(videos) if videos else 0,
-        "average_views_per_video_formatted": format_number(total_views // len(videos)) if videos else "0",
-    }
-    
     latest = sorted(videos, key=lambda x: x.get("upload_date_raw") or "", reverse=True)[:20]
     popular = sorted(videos, key=lambda x: x.get("view_count", 0), reverse=True)[:20]
     oldest = sorted(videos, key=lambda x: x.get("upload_date_raw") or "")[:20]
@@ -294,26 +307,59 @@ def get_channel_max_info(info):
         "timestamp": datetime.now().isoformat(),
         "api_version": VERSION,
         "owner": OWNER,
-        "channel": channel_basic,
-        "statistics": statistics,
+        
+        "channel": {
+            "name": info.get("channel") or info.get("uploader") or info.get("title"),
+            "handle": info.get("uploader_id"),
+            "id": info.get("channel_id") or info.get("id"),
+            "url": info.get("channel_url") or info.get("webpage_url"),
+            "description": info.get("description"),
+            "description_length": len(info.get("description", "") or ""),
+            "description_preview": (info.get("description", "") or "")[:1000],
+            "subscriber_count": info.get("channel_follower_count"),
+            "subscriber_count_formatted": format_number(info.get("channel_follower_count")),
+            "thumbnail": info.get("thumbnail"),
+            "thumbnails": info.get("thumbnails", []),
+        },
+        
+        "statistics": {
+            "total_videos": len(videos),
+            "total_duration_seconds": total_duration,
+            "total_duration_formatted": format_duration(total_duration),
+            "total_duration_hours": round(total_duration / 3600, 2),
+            "total_views": total_views,
+            "total_views_formatted": format_number(total_views),
+            "total_likes": total_likes,
+            "total_likes_formatted": format_number(total_likes),
+            "total_comments": total_comments,
+            "total_comments_formatted": format_number(total_comments),
+            "average_views_per_video": total_views // len(videos) if videos else 0,
+            "average_views_per_video_formatted": format_number(total_views // len(videos)) if videos else "0",
+            "average_duration_seconds": total_duration // len(videos) if videos else 0,
+            "average_duration_formatted": format_duration(total_duration // len(videos)) if videos else "0:00",
+        },
+        
         "sections": {
             "latest": latest,
             "popular": popular,
             "oldest": oldest,
         },
+        
+        "videos_returned": len(videos),
+        "videos_limit": 200,
         "videos": videos,
-        "videos_count": len(videos),
+        
         "summary": {
-            "channel_name": channel_basic["name"],
-            "handle": channel_basic["handle"],
-            "subscribers": channel_basic["subscriber_count_formatted"],
-            "subscribers_raw": channel_basic["subscriber_count"],
-            "total_videos": statistics["total_videos"],
-            "total_views": statistics["total_views_formatted"],
-            "total_duration": statistics["total_duration_formatted"],
-            "thumbnail": channel_basic["thumbnail"],
-            "url": channel_basic["url"],
-            "description": channel_basic["description_preview"][:300],
+            "channel_name": info.get("channel") or info.get("uploader") or info.get("title"),
+            "handle": info.get("uploader_id"),
+            "subscribers": format_number(info.get("channel_follower_count")),
+            "subscribers_raw": info.get("channel_follower_count"),
+            "total_videos": len(videos),
+            "total_views": format_number(total_views),
+            "total_duration": format_duration(total_duration),
+            "thumbnail": info.get("thumbnail"),
+            "url": info.get("channel_url") or info.get("webpage_url"),
+            "description": (info.get("description", "") or "")[:300],
         }
     }
 
@@ -321,9 +367,7 @@ def get_channel_max_info(info):
 # ============================================================
 # VIDEO MAX INFO + DOWNLOAD
 # ============================================================
-def get_video_max_info_and_download(info, url, download=False, quality="1080p", format_type="mp4"):
-    """Video ki MAXIMUM info + optional download"""
-    
+def get_video_max_info(info, url, download=False, quality="1080p", format_type="mp4"):
     duration = info.get("duration") or 0
     video_id = info.get("id")
     view_count = info.get("view_count") or 0
@@ -365,6 +409,7 @@ def get_video_max_info_and_download(info, url, download=False, quality="1080p", 
             "upload_date": info.get("upload_date"),
             "upload_date_formatted": format_date(info.get("upload_date")),
             "release_date": info.get("release_date"),
+            "modified_date": info.get("modified_date"),
             "timestamp": info.get("timestamp"),
         },
         
@@ -373,8 +418,10 @@ def get_video_max_info_and_download(info, url, download=False, quality="1080p", 
             "view_count_formatted": format_number(view_count),
             "like_count": like_count,
             "like_count_formatted": format_number(like_count),
+            "dislike_count": info.get("dislike_count"),
             "comment_count": comment_count,
             "comment_count_formatted": format_number(comment_count),
+            "repost_count": info.get("repost_count"),
             "average_rating": info.get("average_rating"),
         },
         
@@ -393,10 +440,12 @@ def get_video_max_info_and_download(info, url, download=False, quality="1080p", 
             "categories": info.get("categories", []),
             "tags": info.get("tags", []),
             "tags_count": len(info.get("tags", [])),
+            "genre": info.get("genre"),
             "language": info.get("language"),
             "age_limit": info.get("age_limit"),
             "is_family_friendly": info.get("is_family_friendly"),
             "availability": info.get("availability"),
+            "location": info.get("location"),
         },
         
         "subtitles": {
@@ -443,6 +492,22 @@ def get_video_max_info_and_download(info, url, download=False, quality="1080p", 
         
         "formats": [],
         "format_count": len(info.get("formats", [])),
+        
+        "summary": {
+            "title": info.get("title"),
+            "channel": info.get("channel"),
+            "duration": format_duration(duration),
+            "views": view_count,
+            "views_formatted": format_number(view_count),
+            "likes": like_count,
+            "likes_formatted": format_number(like_count),
+            "comments": comment_count,
+            "comments_formatted": format_number(comment_count),
+            "upload_date": format_date(info.get("upload_date")),
+            "thumbnail": info.get("thumbnail"),
+            "short_url": f"https://youtu.be/{video_id}",
+            "formats_count": len(info.get("formats", [])),
+        }
     }
     
     # Formats
@@ -460,31 +525,16 @@ def get_video_max_info_and_download(info, url, download=False, quality="1080p", 
             "filesize": filesize,
             "filesize_formatted": format_filesize(filesize),
             "tbr": f.get("tbr"),
+            "abr": f.get("abr"),
+            "vbr": f.get("vbr"),
+            "audio_channels": f.get("audio_channels"),
             "format_note": f.get("format_note"),
             "quality": f.get("quality"),
             "has_video": f.get("vcodec") != "none",
             "has_audio": f.get("acodec") != "none",
-            "url": f.get("url"),
+            "protocol": f.get("protocol"),
         })
     
-    # Summary
-    result["summary"] = {
-        "title": info.get("title"),
-        "channel": info.get("channel"),
-        "duration": format_duration(duration),
-        "views": view_count,
-        "views_formatted": format_number(view_count),
-        "likes": like_count,
-        "likes_formatted": format_number(like_count),
-        "comments": comment_count,
-        "comments_formatted": format_number(comment_count),
-        "upload_date": format_date(info.get("upload_date")),
-        "thumbnail": info.get("thumbnail"),
-        "short_url": f"https://youtu.be/{video_id}",
-        "formats_count": len(info.get("formats", [])),
-    }
-    
-    # Download agar maanga
     if download:
         download_result = download_and_convert(url, quality, format_type)
         if download_result.get("status") == "success":
@@ -496,11 +546,20 @@ def get_video_max_info_and_download(info, url, download=False, quality="1080p", 
 
 
 # ============================================================
-# DOWNLOAD FUNCTION
+# DOWNLOAD + CONVERT
 # ============================================================
 def download_and_convert(url, quality="1080p", format_type="mp4"):
+    if not check_ffmpeg():
+        return {
+            "status": "error",
+            "error": "FFmpeg is not installed on the server",
+            "solution": "Install FFmpeg: apt install ffmpeg"
+        }
+    
     download_id = str(uuid.uuid4())[:12]
     output_template = os.path.join(DOWNLOAD_DIR, f"{download_id}_%(title)s.%(ext)s")
+    
+    time.sleep(random.uniform(2, 5))
     
     opts = build_ydl_opts(
         download=True,
@@ -515,6 +574,9 @@ def download_and_convert(url, quality="1080p", format_type="mp4"):
             
             title = info.get("title", "video")
             duration = info.get("duration") or 0
+            video_id = info.get("id")
+            view_count = info.get("view_count") or 0
+            like_count = info.get("like_count") or 0
             
             filename = ydl.prepare_filename(info)
             if format_type == "mp3":
@@ -533,6 +595,7 @@ def download_and_convert(url, quality="1080p", format_type="mp4"):
             
             if os.path.exists(actual_file):
                 file_size = os.path.getsize(actual_file)
+                expires_at = (datetime.now() + timedelta(hours=1)).isoformat()
                 
                 download_info = {
                     "download_id": download_id,
@@ -544,37 +607,46 @@ def download_and_convert(url, quality="1080p", format_type="mp4"):
                     "format": format_type,
                     "duration": format_duration(duration),
                     "created_at": datetime.now().isoformat(),
-                    "expires_at": (datetime.now() + timedelta(hours=1)).isoformat(),
+                    "expires_at": expires_at,
                     "download_url": f"/download/{download_id}",
                     "direct_link": f"https://your-app.vercel.app/download/{download_id}",
+                    "video_info": {
+                        "id": video_id,
+                        "title": title,
+                        "channel": info.get("channel"),
+                        "views": view_count,
+                        "views_formatted": format_number(view_count),
+                        "likes": like_count,
+                        "likes_formatted": format_number(like_count),
+                        "thumbnail": info.get("thumbnail"),
+                        "short_url": f"https://youtu.be/{video_id}",
+                    }
                 }
                 
                 DOWNLOAD_STORE[download_id] = {**download_info, "file_path": actual_file}
                 return {"status": "success", "download": download_info}
             
-            return {"status": "error", "error": "File not found"}
+            return {"status": "error", "error": "File not found after download"}
             
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
 
 # ============================================================
-# SINGLE ENDPOINT — SAB KUCH
+# SINGLE ENDPOINT
 # ============================================================
 @app.route('/youtube', methods=['GET', 'POST'])
 @require_api_key
 def youtube_single_endpoint():
-    """
-    YouTube Single Endpoint
-    
-    Video URL   → Full info + Download + Convert
-    Channel URL → Full profile + Info + Videos
-    
-    Usage:
-      /youtube?url=VIDEO_URL&api_key=ANSHZKXXMP&download=true&quality=1080p&format=mp4
-      /youtube?url=CHANNEL_URL&api_key=ANSHZKXXMP
-    """
     try:
+        client_ip = request.remote_addr or 'unknown'
+        if not check_rate_limit(client_ip):
+            return jsonify({
+                "status": "error",
+                "code": 429,
+                "message": "Rate limit exceeded. Wait 5 seconds."
+            }), 429
+        
         if request.method == 'POST' and request.is_json:
             data = request.get_json()
             url = data.get('url')
@@ -592,22 +664,24 @@ def youtube_single_endpoint():
                 "status": "error",
                 "message": "URL required",
                 "usage": {
-                    "video": "/youtube?url=https://youtu.be/VIDEO_ID&api_key=ANSHZKXXMP&download=true",
-                    "channel": "/youtube?url=https://www.youtube.com/@klocuchy&api_key=ANSHZKXXMP"
+                    "video": "/youtube?url=https://youtu.be/VIDEO_ID",
+                    "video_download": "/youtube?url=https://youtu.be/VIDEO_ID&download=true&quality=1080p&format=mp4",
+                    "channel": "/youtube?url=https://www.youtube.com/@klocuchy"
                 }
             }), 400
         
-        if "youtube.com" not in url and "youtu.be" not in url:
-            return jsonify({"status": "error", "message": "Invalid YouTube URL"}), 400
+        if not is_youtube_url(url):
+            return jsonify({
+                "status": "error",
+                "message": "Invalid YouTube URL"
+            }), 400
         
-        # Quality/format validate
         if quality not in ["best", "1080p", "720p", "480p", "360p", "240p"]:
             quality = "1080p"
         
         if format_type not in ["mp4", "mp3"]:
             format_type = "mp4"
         
-        # Extract info
         opts = build_ydl_opts(download=False)
         
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -616,45 +690,77 @@ def youtube_single_endpoint():
             if not info:
                 return jsonify({"status": "error", "error": "No info found"}), 404
             
-            # Channel ya Playlist
-            if info.get('_type') == 'playlist' or 'entries' in info:
+            if info.get("_type") == "playlist":
                 return jsonify(get_channel_max_info(info))
             
-            # Video
-            return jsonify(get_video_max_info_and_download(
-                info, url, download, quality, format_type
-            ))
+            return jsonify(get_video_max_info(info, url, download, quality, format_type))
         
     except yt_dlp.utils.DownloadError as e:
+        app.logger.exception("YouTube extraction failed")
+        error_msg = str(e)
+        
+        if "rate-limited" in error_msg or "This content isn't available" in error_msg:
+            return jsonify({
+                "status": "error",
+                "error": "YouTube rate limit",
+                "message": "YouTube ne IP block kar diya hai. 1 ghante baad try karo.",
+                "retry_after": "1 hour"
+            }), 429
+        
         return jsonify({
             "status": "error",
-            "error": str(e),
-            "message": "YouTube bot detection ya invalid URL"
+            "error": error_msg,
+            "message": "YouTube extraction failed"
         }), 500
         
     except Exception as e:
+        app.logger.exception("YouTube endpoint failed")
         return jsonify({
             "status": "error",
             "error": str(e),
-            "traceback": traceback.format_exc()
+            "message": "Internal server error"
         }), 500
 
 
 # ============================================================
-# DOWNLOAD FILE
+# DOWNLOAD FILE — EXPIRY ENFORCED
 # ============================================================
 @app.route('/download/<download_id>', methods=['GET'])
 def serve_download(download_id):
-    if download_id not in DOWNLOAD_STORE:
-        return jsonify({"status": "error", "message": "Not found"}), 404
+    info = DOWNLOAD_STORE.get(download_id)
     
-    info = DOWNLOAD_STORE[download_id]
+    if not info:
+        return jsonify({
+            "status": "error",
+            "message": "Download not found or expired"
+        }), 404
+    
+    if is_expired(info.get("expires_at")):
+        file_path = info.get("file_path")
+        try:
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+        except OSError:
+            pass
+        DOWNLOAD_STORE.pop(download_id, None)
+        return jsonify({
+            "status": "error",
+            "message": "Download expired"
+        }), 410
+    
     file_path = info.get("file_path")
     
-    if not file_path or not os.path.exists(file_path):
-        return jsonify({"status": "error", "message": "File not found"}), 404
+    if not file_path or not os.path.isfile(file_path):
+        return jsonify({
+            "status": "error",
+            "message": "File not found"
+        }), 404
     
-    return send_file(file_path, as_attachment=True, download_name=info.get("filename"))
+    return send_file(
+        file_path,
+        as_attachment=True,
+        download_name=info.get("filename")
+    )
 
 
 # ============================================================
@@ -667,16 +773,15 @@ def home():
         "name": "ULTIMATE YOUTUBE API",
         "version": VERSION,
         "owner": OWNER,
-        "single_endpoint": "/youtube",
+        "api_key": API_KEY,
+        "api_key_required": True,
         "usage": {
-            "video_full_info": "/youtube?url=VIDEO_URL&api_key=ANSHZKXXMP",
-            "video_download": "/youtube?url=VIDEO_URL&api_key=ANSHZKXXMP&download=true&quality=1080p&format=mp4",
-            "channel_full_info": "/youtube?url=CHANNEL_URL&api_key=ANSHZKXXMP"
+            "video_info": "GET /youtube?url=VIDEO_URL",
+            "video_download": "GET /youtube?url=VIDEO_URL&download=true&quality=1080p&format=mp4",
+            "channel_info": "GET /youtube?url=CHANNEL_URL"
         },
-        "features": {
-            "video": "Full info + Formats + Download + Convert",
-            "channel": "Full profile + Subscribers + Videos + Statistics"
-        }
+        "headers": {"X-API-Key": API_KEY},
+        "ffmpeg_available": check_ffmpeg(),
     })
 
 
@@ -686,6 +791,7 @@ def health():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "yt_dlp_version": yt_dlp.version.__version__,
+        "ffmpeg_available": check_ffmpeg(),
     })
 
 
