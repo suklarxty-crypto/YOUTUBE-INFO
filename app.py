@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # ============================================================
-# ULTIMATE YOUTUBE API - MAXIMUM INFO + DOWNLOAD + CONVERT
-# VERSION: 17.0 ULTIMATE
-# SAB KUCH HARDCODED - API KEY + SCRAPERAPI + COOKIES
+# ULTIMATE YOUTUBE API - FULLY FIXED
+# HEADER + QUERY PARAM BOTH SUPPORTED
+# VERSION: 18.0 FIXED
 # ============================================================
 
 import os
@@ -24,17 +24,17 @@ import yt_dlp
 app = Flask(__name__)
 
 # ============================================================
-# CONFIGURATION - HARDCODED (SAB KUCH ANDAR)
+# CONFIGURATION - HARDCODED
 # ============================================================
 API_KEY = "ANSHZKXXMP"
 SCRAPERAPI_KEY = "9c72d7d42c359e777211cf0b91ff0da2"
 OWNER = "ANSH AFT"
-VERSION = "17.0 ULTIMATE"
+VERSION = "18.0 FIXED"
 
 # ScraperAPI Proxy
 PROXY_URL = f"http://scraperapi:{SCRAPERAPI_KEY}@proxy-server.scraperapi.com:8001"
 
-# YouTube Cookies (base64 encoded)
+# YouTube Cookies (base64)
 YOUTUBE_COOKIES_B64 = "IyBIVFRQIENvb2tpZSBGaWxlCiMgTmV0c2NhcGUgSFRUUCBDb29raWUgRmlsZQouZ29vZ2xlLmNvbQlUUklVCQkvCUZBTFNFCTE3OTM1NDQwMDAJLkFQSVMJRFRZUXY0b3hjbVhMaW02TS9BOF8yQ3RsZ0NJYnRFVGN0YwouZ29vZ2xlLmNvbQlUUklVCQkvCUZBTFNFCTE3OTM1NDQwMDAJLl9TZWN1cmUtMVBBUElTSUQJZ2EwMDBEQWxfSUlPcWVGcExtSzhROUQ1eGloeEs2YTJlMWxCdEdsOWhTYjBvTnNjLTNfN19ZTkNsUnVWR2hIeGtmd0psSTl1Y21RQUNnWUtBWUVTQVJNU0ZRSkdYMk1pRDFRLURqNzlfMlVJTkt0SjhLcGdyQm9WQVVGOHlLcGZjZXhhdGtoalpxMjJuUU50Vk9DcTAwNzYKLnlvdXR1YmUuY29tCVRSVUUJLwkRQUxTRQkxNzkzNTQ0MDAwCS5fU2VjdXJlLTFQU0lECWdhMDAwREFsX0lJT3FlRnBMbUs4UTlENXhpaHhLNmEyZTFNQnRHbDloU2Iwb05zYy0zXzdfWU5DbFJ1VkdoSHhrZndKbEk5dWNtUUFDUW9HQVlFU0FSTVNGUUhHWDJNaUQxUS1Eajc5XzJ1SU5LdEo4S3BnckJvVkFVRjh5S3BmY2V4YXRraGpacTIyblFOdFZPQ3EwMDc2Ci55b3V0dWJlLmNvbQlUUklVCQkvCUZBTFNFCTE3OTM1NDQwMDAJLl9TZWN1cmUtMVBTSUNDCUFLOGFUalZhbk1fd2x2dTB2M0s2TkQ2Ym1IajJWVEhMeldmeTFsbTFPRXI4dGRPQ0UtaWg2N2t6Sk1aVjV6bGlKWjdubnhoUQouZ29vZ2xlLmNvbQlUUklVCQkvCUZBTFNFCTE3OTM1NDQwMDAJLl9TZWN1cmUtMVBTSUNDCUFLOGFUalhrTEpXNHJmYTJMU3c5S0RwRlY4LXQ3N09ZNFQ1UHctdUZBNy1xSVZjYlZYdXFjd3RZOUNpRmtxaENXeFlqYXUtbTBB"
 
 # Download directory
@@ -130,16 +130,13 @@ def build_ydl_opts(download=False, format_type=None, quality=None, output_templa
         "extractor_retries": 3,
     }
     
-    # Proxy
     if PROXY_URL:
         opts["proxy"] = PROXY_URL
     
-    # Cookies
     cookies_file = get_cookies_file()
     if cookies_file:
         opts["cookiefile"] = cookies_file
     
-    # Download mode
     if download:
         opts["outtmpl"] = output_template
         
@@ -212,25 +209,44 @@ def format_number(num):
 
 
 # ============================================================
-# API KEY DECORATOR
+# API KEY DECORATOR - HEADER + QUERY PARAM + JSON BODY
 # ============================================================
 def require_api_key(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        api_key = None
+        
+        # 1. Header se
         api_key = request.headers.get("X-API-Key")
+        
+        # 2. Query parameter se
+        if not api_key:
+            api_key = request.args.get("api_key")
+        
+        # 3. JSON body se
+        if not api_key and request.is_json:
+            try:
+                data = request.get_json(silent=True)
+                if data:
+                    api_key = data.get("api_key")
+            except Exception:
+                pass
+        
         if not api_key:
             return jsonify({
                 "status": "error",
                 "code": 401,
                 "message": "API key required",
-                "hint": "Use header: X-API-Key: ANSHZKXXMP"
+                "hint": "Use header X-API-Key OR query param ?api_key=YOUR_KEY"
             }), 401
+        
         if api_key != API_KEY:
             return jsonify({
                 "status": "error",
                 "code": 403,
                 "message": "Invalid API key"
             }), 403
+        
         return f(*args, **kwargs)
     return decorated
 
@@ -510,7 +526,6 @@ def get_video_max_info(info, url, download=False, quality="1080p", format_type="
         }
     }
     
-    # Formats
     for f in info.get("formats", []):
         filesize = f.get("filesize") or f.get("filesize_approx")
         result["formats"].append({
@@ -609,7 +624,7 @@ def download_and_convert(url, quality="1080p", format_type="mp4"):
                     "created_at": datetime.now().isoformat(),
                     "expires_at": expires_at,
                     "download_url": f"/download/{download_id}",
-                    "direct_link": f"https://your-app.vercel.app/download/{download_id}",
+                    "direct_link": f"https://youtube-info-ivory.vercel.app/download/{download_id}",
                     "video_info": {
                         "id": video_id,
                         "title": title,
@@ -664,9 +679,9 @@ def youtube_single_endpoint():
                 "status": "error",
                 "message": "URL required",
                 "usage": {
-                    "video": "/youtube?url=https://youtu.be/VIDEO_ID",
-                    "video_download": "/youtube?url=https://youtu.be/VIDEO_ID&download=true&quality=1080p&format=mp4",
-                    "channel": "/youtube?url=https://www.youtube.com/@klocuchy"
+                    "video": "/youtube?url=https://youtu.be/VIDEO_ID&api_key=ANSHZKXXMP",
+                    "video_download": "/youtube?url=https://youtu.be/VIDEO_ID&download=true&quality=1080p&format=mp4&api_key=ANSHZKXXMP",
+                    "channel": "/youtube?url=https://www.youtube.com/@klocuchy&api_key=ANSHZKXXMP"
                 }
             }), 400
         
@@ -773,12 +788,12 @@ def home():
         "name": "ULTIMATE YOUTUBE API",
         "version": VERSION,
         "owner": OWNER,
-        "api_key": API_KEY,
         "api_key_required": True,
+        "api_key": API_KEY,
         "usage": {
-            "video_info": "GET /youtube?url=VIDEO_URL",
-            "video_download": "GET /youtube?url=VIDEO_URL&download=true&quality=1080p&format=mp4",
-            "channel_info": "GET /youtube?url=CHANNEL_URL"
+            "video_info": "GET /youtube?url=VIDEO_URL&api_key=ANSHZKXXMP",
+            "video_download": "GET /youtube?url=VIDEO_URL&download=true&quality=1080p&format=mp4&api_key=ANSHZKXXMP",
+            "channel_info": "GET /youtube?url=CHANNEL_URL&api_key=ANSHZKXXMP"
         },
         "headers": {"X-API-Key": API_KEY},
         "ffmpeg_available": check_ffmpeg(),
