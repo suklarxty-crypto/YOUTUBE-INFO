@@ -39,7 +39,7 @@ app = Flask(__name__)
 
 # API KEY
 VALID_KEYS = {
-    "AK$&FF": "full_access"
+    "FFG": "full_access"
 }
 
 # ==============================================
