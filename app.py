@@ -1,6 +1,6 @@
-# app.py - YouTube Downloader API v22.0 STABLE
+# app.py - YouTube Downloader API v23.0 FINAL
 # Made by @KINGFFAIAK47x · ANSH AFT
-# POT DISABLED + URL VALIDATION + VIDEO EXIST CHECK
+# COMPLETE YOUTUBE COOKIES + STICKY PROXY + EXACT UA + POT DISABLED
 
 import os
 import sys
@@ -59,21 +59,28 @@ COOKIES_FILE = "/tmp/yt_cookies.txt"
 try:
     if os.path.exists(COOKIES_SRC):
         shutil.copy2(COOKIES_SRC, COOKIES_FILE)
+        log_event("Cookies copied")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     log_event("Config loaded")
 except Exception as e:
     log_event(f"FS ERROR: {e}", "ERROR")
 
 # ==============================================
-# PROXY
+# PROXY - STICKY IP (SAME IP EVERY REQUEST)
 # ==============================================
 
-PROXY_HOST = "p.webshare.io"
-PROXY_PORT = "80"
-PROXY_USER = "zhzvbrqp-rotate"
+PROXY_HOST = "31.59.20.176"
+PROXY_PORT = "6754"
+PROXY_USER = "zhzvbrqp"
 PROXY_PASS = "0dyibxc2gqma"
 PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
 USE_PROXY = True
+
+# ==============================================
+# EXACT USER-AGENT (CHROME 154 - MATCHES COOKIES)
+# ==============================================
+
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 
 # ==============================================
 # THREADS / CACHE
@@ -256,14 +263,10 @@ def require_api_key(f):
 
 
 # ==============================================
-# URL VALIDATION (STRICT)
+# URL VALIDATION
 # ==============================================
 
 def validate_youtube_url(url):
-    """
-    Validate YouTube URL and extract video ID.
-    Returns: (is_valid, video_id_or_error_message)
-    """
     if not url:
         return False, "URL required"
     
@@ -272,7 +275,6 @@ def validate_youtube_url(url):
     if len(url) < 10 or len(url) > 500:
         return False, "URL length invalid (must be 10-500 chars)"
     
-    # YouTube URL patterns with video ID capture
     patterns = [
         (r'^https?://(www\.)?youtube\.com/watch\?v=([\w\-]{11})', 'watch'),
         (r'^https?://(www\.)?youtu\.be/([\w\-]{11})', 'short'),
@@ -285,35 +287,13 @@ def validate_youtube_url(url):
     for pattern, _ in patterns:
         match = re.match(pattern, url)
         if match:
-            # Extract video ID (last group)
             video_id = match.groups()[-1]
             return True, video_id
     
-    # Check if it's a YouTube URL but invalid format
     if 'youtube.com' in url or 'youtu.be' in url:
         return False, "Invalid YouTube URL format. Video ID must be 11 characters."
     
     return False, "Not a YouTube URL. Must be youtube.com or youtu.be"
-
-
-def extract_video_id(url):
-    """Extract just the video ID from any YouTube URL."""
-    if not url:
-        return None
-    
-    url = str(url).strip()
-    
-    patterns = [
-        r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/embed/)([\w\-]{11})',
-        r'^([\w\-]{11})$',
-    ]
-    
-    for p in patterns:
-        m = re.search(p, url)
-        if m:
-            return m.group(1)
-    
-    return None
 
 
 def validate_quality(q):
@@ -345,7 +325,7 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
         "geo_bypass": True,
         "cachedir": False,
         "no_color": True,
-        "socket_timeout": 12,
+        "socket_timeout": 15,
         "retries": 1,
         "fragment_retries": 1,
         "extractor_retries": 1,
@@ -354,13 +334,19 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
         "consoletitle": False,
         "format": format_str,
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "User-Agent": USER_AGENT,
             "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
         },
         "extractor_args": {
             "youtube": {
                 "player_client": ["tv", "web", "mweb", "android"],
-                "fetch_pot": ["never"],  # POT disabled
+                "fetch_pot": ["never"],
             },
         },
         "no_call_home": True,
@@ -384,8 +370,6 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
         opts["js_runtimes"] = {"deno": {}}
     elif check_node():
         opts["js_runtimes"] = {"node": {}}
-    
-    # POT server disabled - not adding extractor_arg
     
     if USE_PROXY and not no_proxy:
         opts["proxy"] = PROXY_URL
@@ -507,9 +491,9 @@ def extract_info(url):
         return {"_error": "yt-dlp not available", "_verified": False}
     
     attempts = [
-        {"use_cookies": True, "no_proxy": False, "label": "ck+px", "timeout": 15},
-        {"use_cookies": True, "no_proxy": True, "label": "ck", "timeout": 15},
-        {"use_cookies": False, "no_proxy": False, "label": "px", "timeout": 12},
+        {"use_cookies": True, "no_proxy": False, "label": "ck+px", "timeout": 20},
+        {"use_cookies": True, "no_proxy": True, "label": "ck", "timeout": 20},
+        {"use_cookies": False, "no_proxy": False, "label": "px", "timeout": 15},
     ]
     
     all_errors = []
@@ -818,28 +802,27 @@ def upload_parallel(fp):
 
 
 # ==============================================
-# CHECK VIDEO EXISTS (BEFORE DOWNLOAD)
+# CHECK VIDEO EXISTS
 # ==============================================
 
 def check_video_exists(url, video_id):
-    """
-    Quick check if video exists before downloading.
-    Returns: (exists: bool, info_or_error)
-    """
     yt = get_yt_dlp()
     if not yt:
         return False, {"error": "yt-dlp not available"}
     
     try:
-        # Use 'flat' extraction - much faster, just checks metadata
         opts = {
             "quiet": True,
             "no_warnings": True,
             "nocheckcertificate": True,
-            "socket_timeout": 10,
+            "socket_timeout": 12,
             "retries": 0,
             "extract_flat": True,
             "skip_download": True,
+            "http_headers": {
+                "User-Agent": USER_AGENT,
+                "Accept-Language": "en-US,en;q=0.9",
+            },
         }
         
         if USE_PROXY:
@@ -854,44 +837,32 @@ def check_video_exists(url, video_id):
             if not info:
                 return False, {"error": "Video not found"}
             
-            # Check if YouTube returned error
             if info.get("_error"):
                 return False, {"error": info["_error"]}
             
-            # Verify video ID matches
             returned_id = info.get("id")
             if returned_id != video_id:
-                return False, {"error": f"Video ID mismatch: expected {video_id}, got {returned_id}"}
+                return False, {"error": f"Video ID mismatch"}
             
-            # Check title exists
             if not info.get("title"):
-                return False, {"error": "Video has no title (may be deleted or private)"}
+                return False, {"error": "Video has no title"}
             
-            # Check availability
             availability = info.get("availability", "public")
             if availability in ("private", "premium_only", "subscriber_only"):
-                return False, {"error": f"Video is {availability}"}
+                return False, {"error": f"Video is {availability}", "error_code": "PRIVATE_VIDEO"}
             
             return True, info
     
     except Exception as e:
         err_msg = str(e)
-        # Detect specific errors
         if "Video unavailable" in err_msg:
             return False, {"error": "Video unavailable", "error_code": "VIDEO_UNAVAILABLE"}
         if "Private video" in err_msg:
             return False, {"error": "Private video", "error_code": "PRIVATE_VIDEO"}
         if "This video has been removed" in err_msg:
             return False, {"error": "Video removed", "error_code": "VIDEO_REMOVED"}
-        if "This video is not available" in err_msg:
-            return False, {"error": "Video not available in your region", "error_code": "REGION_BLOCKED"}
-        if "copyright" in err_msg.lower():
-            return False, {"error": "Video blocked by copyright", "error_code": "COPYRIGHT"}
         if "Sign in to confirm" in err_msg:
-            return False, {"error": "YouTube bot check - cookies need refresh", "error_code": "BOT_CHECK"}
-        if "Unable to extract" in err_msg:
-            return False, {"error": "Cannot extract video info", "error_code": "EXTRACT_ERROR"}
-        
+            return False, {"error": "YouTube bot check - cookies issue", "error_code": "BOT_CHECK"}
         return False, {"error": err_msg[:200], "error_code": "UNKNOWN"}
 
 
@@ -900,9 +871,6 @@ def check_video_exists(url, video_id):
 # ==============================================
 
 def process_video(url, quality="720p", video_id=None):
-    errors = []
-    yt = None
-    
     try:
         yt = get_yt_dlp()
     except Exception as e:
@@ -923,12 +891,9 @@ def process_video(url, quality="720p", video_id=None):
     
     t_start = time.time()
     
-    # ==========================================
-    # STEP 1: CHECK VIDEO EXISTS (FAST)
-    # ==========================================
+    # STEP 1: Check video exists
     if video_id:
         exists, check_result = check_video_exists(url, video_id)
-        
         if not exists:
             total_time = round(time.time() - t_start, 2)
             return {
@@ -942,9 +907,7 @@ def process_video(url, quality="720p", video_id=None):
                 "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
             }
     
-    # ==========================================
-    # STEP 2: PARALLEL DOWNLOAD + INFO
-    # ==========================================
+    # STEP 2: Parallel download + info
     dl_result = {"status": "pending"}
     info_result = {"info": None}
     dl_lock = threading.Lock()
@@ -1012,10 +975,7 @@ def process_video(url, quality="720p", video_id=None):
                 info_result["info"] = info
         except Exception as e:
             with info_lock:
-                info_result["info"] = {
-                    "_error": str(e)[:200],
-                    "_verified": False,
-                }
+                info_result["info"] = {"_error": str(e)[:200], "_verified": False}
     
     t_dl = threading.Thread(target=do_download, daemon=True)
     t_info = threading.Thread(target=do_info, daemon=True)
@@ -1082,7 +1042,7 @@ def process_video(url, quality="720p", video_id=None):
 def home():
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "22.0.0",
+        "version": "23.0.0 FINAL",
         "description": "Download YouTube videos and get complete info in one request",
         "endpoints": {
             "/yt": {
@@ -1125,6 +1085,8 @@ def health():
         "pot_server": False,
         "cookies_file": os.path.exists(COOKIES_FILE),
         "cookies_size": os.path.getsize(COOKIES_FILE) if os.path.exists(COOKIES_FILE) else 0,
+        "proxy_enabled": USE_PROXY,
+        "user_agent": USER_AGENT[:60] + "...",
     }), 200
 
 
@@ -1135,7 +1097,7 @@ def debug():
     
     return jsonify({
         "status": "ok",
-        "version": "22.0.0",
+        "version": "23.0.0",
         "started_at": _STARTUP_TIME,
         "now": datetime.now().isoformat(),
         "pid": os.getpid(),
@@ -1149,6 +1111,12 @@ def debug():
             "output_dir": os.path.exists(OUTPUT_DIR),
             "threadpool": _EXECUTOR is not None,
         },
+        "proxy": {
+            "enabled": USE_PROXY,
+            "host": PROXY_HOST,
+            "port": PROXY_PORT,
+        },
+        "user_agent": USER_AGENT,
         "cache": {"entries": len(_INFO_CACHE)},
         "threads": {
             "active": threading.active_count(),
@@ -1174,9 +1142,6 @@ def download_yt():
                 "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
             }), 400
         
-        # ==========================================
-        # STRICT URL VALIDATION
-        # ==========================================
         is_valid, result = validate_youtube_url(url_raw)
         
         if not is_valid:
@@ -1185,19 +1150,15 @@ def download_yt():
                 "error_code": "INVALID_URL",
                 "message": result,
                 "url_received": url_raw,
-                "hint": "Provide a valid YouTube URL like: https://youtu.be/VIDEO_ID or https://youtube.com/watch?v=VIDEO_ID",
+                "hint": "Provide a valid YouTube URL like: https://youtu.be/VIDEO_ID",
                 "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
             }), 400
         
-        video_id = result  # video ID extracted
-        # Build clean URL from video ID
+        video_id = result
         url = f"https://www.youtube.com/watch?v={video_id}"
         
         quality = validate_quality(quality)
         
-        # ==========================================
-        # PROCESS VIDEO
-        # ==========================================
         result_data = process_video(url, quality, video_id=video_id)
         result_data["credit"] = {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
         
@@ -1238,8 +1199,10 @@ def handle_exception(e):
 
 # Startup
 log_event("=" * 60)
-log_event("YouTube Downloader API v22.0 STARTED")
+log_event("YouTube Downloader API v23.0 FINAL STARTED")
 log_event(f"Deno: {check_deno()}, Node: {check_node()}, FFmpeg: {check_ffmpeg()}")
+log_event(f"Proxy: {PROXY_HOST}:{PROXY_PORT}")
+log_event(f"UA: {USER_AGENT[:80]}...")
 log_event("POT server: DISABLED (cookies + proxy only)")
 log_event("=" * 60)
 
