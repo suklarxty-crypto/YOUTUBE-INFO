@@ -1,6 +1,6 @@
-# app.py - YouTube Downloader API v7.0
+# app.py - YouTube Downloader API v8.0
 # Made by @KINGFFAIAK47x · ANSH AFT
-# FIXED: Format selection + client reduction
+# FIXED: PO Token + Correct Format + Client
 
 from flask import Flask, jsonify, request
 import os
@@ -212,25 +212,25 @@ def validate_quality(q):
 
 
 # ==============================================
-# YT-DLP OPTS - FIXED
+# YT-DLP OPTS - FIXED v8.0
 # ==============================================
 
-def build_opts(download=False, quality="720p", use_cookies=True, attempt_num=1):
+def build_opts(download=False, quality="720p", use_cookies=True):
     """
-    Fixed yt-dlp options
-    - Format string simplified
-    - Client reduced to working ones
+    yt-dlp v8.0 - FIXED:
+    - Format: bv*+ba/b (flexible)
+    - Clients: web, mweb, tv (SABR-aware)
+    - PO Token: auto
     """
     
     # ============================================
-    # FORMAT STRING - SIMPLIFIED
+    # FORMAT SELECTOR - FLEXIBLE
     # ============================================
     if quality == "best":
         format_str = "bv*+ba/b"
     else:
         try:
             h = int(str(quality).rstrip("p"))
-            # Simple format: best video+audio at height, or fallback
             format_str = f"bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b"
         except:
             format_str = "bv*+ba/b"
@@ -250,10 +250,10 @@ def build_opts(download=False, quality="720p", use_cookies=True, attempt_num=1):
         "noprogress": True,
         "consoletitle": False,
         
-        # ⚡ SIMPLIFIED CLIENTS - Only working ones with cookies
+        # ⚡ CLIENTS - SABR-aware (no web_safari)
         "extractor_args": {
             "youtube": {
-                "player_client": ["web", "mweb"],
+                "player_client": ["web", "mweb", "tv"],
             }
         },
         
@@ -264,6 +264,14 @@ def build_opts(download=False, quality="720p", use_cookies=True, attempt_num=1):
         
         # ⚡ FORMAT STRING
         "format": format_str,
+        
+        # ⚡ PO TOKEN - Auto fetch
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "mweb", "tv"],
+                "fetch_pot": ["auto"],
+            }
+        },
     }
     
     # ============================================
@@ -296,7 +304,6 @@ def extract_info(url):
     if not yt:
         return {"_error": "yt-dlp not available"}
     
-    # Try with cookies first
     attempts = [
         {"use_cookies": True, "label": "with_cookies"},
         {"use_cookies": False, "label": "without_cookies"},
@@ -462,7 +469,6 @@ def process_video(url, quality="720p"):
     
     t_start = time.time()
     
-    # Step 1: Extract info
     info = extract_info(url)
     if not info or info.get("_error"):
         return {
@@ -478,8 +484,6 @@ def process_video(url, quality="720p"):
         }
     
     full = build_full_info(info)
-    
-    # Step 2: Download
     dl_data = {"status": "failed"}
     fname = None
     
@@ -538,7 +542,7 @@ def home():
     cookie_status, cookie_msg = verify_cookies_file()
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "7.0.0",
+        "version": "8.0.0",
         "status": "active",
         "cookies_loaded": cookie_status,
         "cookies_message": cookie_msg,
@@ -610,7 +614,7 @@ def internal_error(error):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print("=" * 60)
-    print("🎬 YOUTUBE DOWNLOADER API v7.0")
+    print("🎬 YOUTUBE DOWNLOADER API v8.0")
     print("=" * 60)
     print(f"🚀 Port: {port}")
     print("=" * 60)
