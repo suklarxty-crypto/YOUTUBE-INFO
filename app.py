@@ -1,6 +1,6 @@
-# app.py - YouTube Downloader API v9.0
+# app.py - YouTube Downloader API v10.0
 # Made by @KINGFFAIAK47x · ANSH AFT
-# WITH: Webshare Residential Proxy + PO Token + Deno + Multi-Client
+# FIXED: Read-only FS + POT server + Docker mode
 
 from flask import Flask, jsonify, request
 import os
@@ -27,12 +27,21 @@ VALID_KEYS = {
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = "/tmp/youtube_data"
-COOKIES_FILE = os.path.join(SCRIPT_DIR, "yt_cookies.txt")
+
+# ⚡ COOKIES: /tmp (writable) mein copy karo
+COOKIES_SRC = os.path.join(SCRIPT_DIR, "yt_cookies.txt")
+COOKIES_FILE = "/tmp/yt_cookies.txt"
+
+if os.path.exists(COOKIES_SRC):
+    try:
+        shutil.copy2(COOKIES_SRC, COOKIES_FILE)
+    except Exception as e:
+        print(f"Cookie copy error: {e}")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ==============================================
-# ⚡ WEBSHARE RESIDENTIAL PROXY - CONFIGURED ✅
+# ⚡ WEBSHARE RESIDENTIAL PROXY
 # ==============================================
 
 PROXY_HOST = "p.webshare.io"
@@ -40,10 +49,7 @@ PROXY_PORT = "80"
 PROXY_USER = "zhzvbrqp-rotate"
 PROXY_PASS = "0dyibxc2gqma"
 
-# Proxy URL (Webshare rotating proxy)
 PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
-
-# Proxy enabled
 USE_PROXY = True
 
 # ==============================================
@@ -87,9 +93,9 @@ def check_ffmpeg():
 
 
 def check_pot_server():
-    """Check if PO Token provider server is running"""
+    """Check if POT provider running"""
     try:
-        r = get_requests().get("http://127.0.0.1:4416/ping", timeout=2)
+        r = get_requests().get("http://127.0.0.1:4416/ping", timeout=3)
         return r.status_code == 200
     except:
         return False
@@ -224,8 +230,6 @@ def validate_youtube_url(url):
         r'^https?://(www\.)?youtu\.be/[\w\-]+',
         r'^https?://(www\.)?youtube\.com/shorts/[\w\-]+',
         r'^https?://(www\.)?youtube\.com/embed/[\w\-]+',
-        r'^https?://m\.youtube\.com/watch\?v=[\w\-]+',
-        r'^https?://music\.youtube\.com/watch\?v=[\w\-]+',
     ]
     for p in patterns:
         if re.match(p, url):
@@ -242,13 +246,10 @@ def validate_quality(q):
 
 
 # ==============================================
-# YT-DLP OPTS - v9.0 FINAL
+# YT-DLP OPTS
 # ==============================================
 
 def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False):
-    """Build yt-dlp options - FULLY OPTIMIZED"""
-    
-    # Format selector
     if quality == "best":
         format_str = "bv*+ba/b"
     else:
@@ -272,17 +273,11 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
         "skip_unavailable_fragments": True,
         "noprogress": True,
         "consoletitle": False,
-        
-        # ⚡ FORMAT
         "format": format_str,
-        
-        # ⚡ HTTP HEADERS
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         },
-        
-        # ⚡ PLAYER CLIENTS - SABR-aware
         "extractor_args": {
             "youtube": {
                 "player_client": ["web", "mweb", "tv"],
@@ -292,23 +287,18 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
                 "base_url": "http://127.0.0.1:4416",
             },
         },
-        
-        # ⚡ JS RUNTIME (Deno + Node)
         "js_runtimes": {
             "deno": {},
             "node": {},
         },
     }
     
-    # ⚡ PROXY
     if USE_PROXY and not no_proxy:
         opts["proxy"] = PROXY_URL
     
-    # ⚡ COOKIES
     if use_cookies and os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
     
-    # ⚡ DOWNLOAD SPECIFIC
     if download:
         out_dir = os.path.join(OUTPUT_DIR, "downloads")
         os.makedirs(out_dir, exist_ok=True)
@@ -316,22 +306,13 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
         opts["concurrent_fragment_downloads"] = 16
         opts["buffersize"] = 1024 * 1024
         opts["merge_output_format"] = "mp4"
-        # Reconnect on network errors
-        opts["downloader_args"] = {
-            "ffmpeg_i": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-        }
     else:
         opts["skip_download"] = True
     
     return opts
 
 
-# ==============================================
-# EXTRACT
-# ==============================================
-
 def extract_info(url):
-    """Try multiple strategies"""
     yt = get_yt_dlp()
     if not yt:
         return {"_error": "yt-dlp not available"}
@@ -366,7 +347,6 @@ def extract_info(url):
 
 
 def build_full_info(info):
-    """Extract ALL info"""
     if not info or info.get("_error"):
         return {"error": info.get("_error", "No info") if info else "No info"}
     
@@ -377,9 +357,8 @@ def build_full_info(info):
     lc = safe_int(info.get("like_count"))
     cc = safe_int(info.get("comment_count"))
     
-    # Format list
     formats = []
-    for f in (info.get("formats") or []):
+    for f in (info.get("formats") or [])[:10]:
         if not f:
             continue
         fs = f.get("filesize") or f.get("filesize_approx")
@@ -387,44 +366,25 @@ def build_full_info(info):
             "format_id": safe_str(f.get("format_id")),
             "ext": safe_str(f.get("ext")),
             "resolution": safe_str(f.get("resolution")),
-            "width": safe_int(f.get("width")),
             "height": safe_int(f.get("height")),
-            "fps": safe_int(f.get("fps")),
-            "vcodec": safe_str(f.get("vcodec")),
-            "acodec": safe_str(f.get("acodec")),
             "filesize": safe_int(fs),
             "filesize_formatted": fmt_size(fs),
-            "format_note": safe_str(f.get("format_note")),
-            "quality": safe_int(f.get("quality")),
-            "has_video": f.get("vcodec") != "none",
-            "has_audio": f.get("acodec") != "none",
+            "vcodec": safe_str(f.get("vcodec")),
+            "acodec": safe_str(f.get("acodec")),
         })
     
     return {
         "video": {
             "id": vid,
             "title": safe_str(info.get("title")),
-            "fulltitle": safe_str(info.get("fulltitle")),
             "url": safe_str(info.get("webpage_url")),
             "short_url": f"https://youtu.be/{vid}",
-            "embed_url": f"https://www.youtube.com/embed/{vid}",
             "description": desc[:1000],
-            "description_length": len(desc),
             "thumbnail": safe_str(info.get("thumbnail")),
-            "thumbnail_hd": f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg",
-            "thumbnail_sd": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
         },
         "duration": {
             "seconds": dur,
-            "string": safe_str(info.get("duration_string")),
             "formatted": fmt_dur(dur),
-            "minutes": dur // 60 if dur else 0,
-            "hours": dur // 3600 if dur else 0,
-        },
-        "dates": {
-            "upload_date": safe_str(info.get("upload_date")),
-            "release_date": safe_str(info.get("release_date")),
-            "timestamp": safe_int(info.get("timestamp")),
         },
         "engagement": {
             "view_count": vc,
@@ -432,29 +392,18 @@ def build_full_info(info):
             "like_count": lc,
             "like_count_formatted": fmt_num(lc),
             "comment_count": cc,
-            "comment_count_formatted": fmt_num(cc),
         },
         "channel": {
             "name": safe_str(info.get("channel")),
             "id": safe_str(info.get("channel_id")),
-            "url": safe_str(info.get("channel_url")),
-            "uploader": safe_str(info.get("uploader")),
-            "uploader_id": safe_str(info.get("uploader_id")),
             "follower_count": safe_int(info.get("channel_follower_count")),
-            "follower_count_formatted": fmt_num(info.get("channel_follower_count")),
         },
         "metadata": {
-            "categories": info.get("categories") or [],
             "tags": info.get("tags") or [],
-            "tags_count": len(info.get("tags") or []),
             "language": safe_str(info.get("language")),
             "age_limit": safe_int(info.get("age_limit")),
-            "availability": safe_str(info.get("availability")),
         },
         "technical": {
-            "ext": safe_str(info.get("ext")),
-            "format": safe_str(info.get("format")),
-            "format_id": safe_str(info.get("format_id")),
             "width": safe_int(info.get("width")),
             "height": safe_int(info.get("height")),
             "fps": safe_int(info.get("fps")),
@@ -463,12 +412,8 @@ def build_full_info(info):
             "filesize": safe_int(info.get("filesize")),
             "filesize_formatted": fmt_size(info.get("filesize")),
         },
-        "extractor": {
-            "name": safe_str(info.get("extractor")),
-            "key": safe_str(info.get("extractor_key")),
-        },
         "formats": formats,
-        "format_count": len(formats),
+        "format_count": len(info.get("formats") or []),
     }
 
 
@@ -553,7 +498,7 @@ def upload_parallel(fp):
 
 
 # ==============================================
-# PROCESS VIDEO
+# PROCESS
 # ==============================================
 
 def process_video(url, quality="720p"):
@@ -567,9 +512,6 @@ def process_video(url, quality="720p"):
     
     t_start = time.time()
     
-    # ============================================
-    # STEP 1: Extract Info
-    # ============================================
     info = extract_info(url)
     if not info or info.get("_error"):
         return {
@@ -588,12 +530,7 @@ def process_video(url, quality="720p"):
         }
     
     full = build_full_info(info)
-    
-    # ============================================
-    # STEP 2: Download
-    # ============================================
     dl_data = {"status": "failed"}
-    share_url = None
     fname = None
     
     try:
@@ -603,7 +540,7 @@ def process_video(url, quality="720p"):
             fname = ydl.prepare_filename(dl_info)
             if not os.path.exists(fname):
                 base = os.path.splitext(fname)[0]
-                for ext in [".mp4", ".mkv", ".webm", ".m4a", ".mp3"]:
+                for ext in [".mp4", ".mkv", ".webm"]:
                     if os.path.exists(base + ext):
                         fname = base + ext
                         break
@@ -611,7 +548,6 @@ def process_video(url, quality="720p"):
         if fname and os.path.exists(fname):
             size = os.path.getsize(fname)
             up_res = upload_parallel(fname)
-            share_url = up_res.get("url")
             
             dl_data = {
                 "status": "success",
@@ -619,11 +555,9 @@ def process_video(url, quality="720p"):
                 "file_size": size,
                 "file_size_formatted": fmt_size(size),
                 "quality": quality,
-                "share_url": share_url or "UPLOAD_FAILED",
+                "share_url": up_res.get("url") or "UPLOAD_FAILED",
                 "upload_host": up_res.get("host") or "N/A"
             }
-        else:
-            dl_data = {"status": "failed", "error": "File not found after download"}
     except Exception as ex:
         dl_data = {"status": "failed", "error": str(ex)[:200]}
     
@@ -635,13 +569,11 @@ def process_video(url, quality="720p"):
         "download": dl_data,
         "video": full.get("video", {}),
         "duration": full.get("duration", {}),
-        "dates": full.get("dates", {}),
         "engagement": full.get("engagement", {}),
         "channel": full.get("channel", {}),
         "metadata": full.get("metadata", {}),
         "technical": full.get("technical", {}),
-        "extractor": full.get("extractor", {}),
-        "formats": full.get("formats", [])[:10],  # Top 10 formats
+        "formats": full.get("formats", []),
         "format_count": full.get("format_count", 0),
         "environment": {
             "deno": check_deno(),
@@ -667,11 +599,12 @@ def home():
     cookie_status, cookie_msg = verify_cookies_file()
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "9.0.0",
+        "version": "10.0.0",
         "status": "active",
         "system": {
             "cookies_loaded": cookie_status,
             "cookies_message": cookie_msg,
+            "cookies_file": COOKIES_FILE,
             "deno_available": check_deno(),
             "node_available": check_node(),
             "ffmpeg_available": check_ffmpeg(),
@@ -686,10 +619,7 @@ def home():
                 "example": "/yt?url=YOUTUBE_URL&quality=720p&key=FF"
             }
         },
-        "credit": {
-            "username": "@KINGFFAIAK47x",
-            "made_by": "ANSH AFT"
-        }
+        "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
     }), 200
 
 
@@ -702,6 +632,7 @@ def health():
         "ffmpeg": check_ffmpeg(),
         "pot_server": check_pot_server(),
         "proxy": USE_PROXY,
+        "cookies_file": COOKIES_FILE,
         "timestamp": datetime.now().isoformat()
     }), 200
 
@@ -761,10 +692,11 @@ def internal_error(error):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print("=" * 60)
-    print("🎬 YOUTUBE DOWNLOADER API v9.0")
+    print("🎬 YOUTUBE DOWNLOADER API v10.0")
     print("=" * 60)
     print(f"🚀 Port: {port}")
     print(f"🍪 Cookies: {verify_cookies_file()[1]}")
+    print(f"📁 Cookies path: {COOKIES_FILE}")
     print(f"⚙️  Deno: {check_deno()}")
     print(f"📦 Node: {check_node()}")
     print(f"🎥 ffmpeg: {check_ffmpeg()}")
