@@ -20,17 +20,24 @@ RUN deno --version && node --version && ffmpeg -version
 
 WORKDIR /app
 
+# Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Clone and build bgutil POT provider
 RUN git clone --single-branch --branch 2.0.0 \
     https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /app/bgutil
-RUN cd /app/bgutil/server && npm ci && npx tsc
+RUN cd /app/bgutil/server && \
+    npm ci && \
+    npx tsc
 
+# Copy app
 COPY app.py .
 COPY yt_cookies.txt .
 
 EXPOSE 10000
 
-CMD gunicorn app:app --bind 0.0.0.0:$PORT --timeout 300 --workers 1 --threads 4
+# Start POT server + gunicorn
+CMD node /app/bgutil/server/build/main.js --port 4416 & \
+    sleep 5 && \
+    gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600 --workers 1 --threads 8
