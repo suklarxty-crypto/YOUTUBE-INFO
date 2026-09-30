@@ -1,6 +1,6 @@
-# app.py - YouTube Downloader API v4.1
+# app.py - YouTube Downloader API v4.2
 # Made by @KINGFFAIAK47x · ANSH AFT
-# FIXED: js_runtimes dict format + Node.js fallback
+# FIXED: js_runtimes format properly handled
 
 from flask import Flask, jsonify, request
 import os
@@ -68,6 +68,10 @@ def check_deno():
 
 def check_node():
     return shutil.which("node") is not None
+
+
+def get_node_path():
+    return shutil.which("node")
 
 
 def get_ytdlp_version():
@@ -296,19 +300,17 @@ def append_db(vdata):
 
 
 # ==============================================
-# YT-DLP OPTS - FIXED js_runtimes FORMAT
+# YT-DLP OPTS - NO JS_RUNTIMES (AUTO-DETECT)
 # ==============================================
 
 def build_opts(download=False, quality="720p", use_cookies=True):
     """
-    yt-dlp 2026.08.19 compatible options
-    FIXED: js_runtimes is DICT not LIST
+    yt-dlp 2026.08.19 compatible
+    JS RUNTIME: HATA DIYA — yt-dlp auto-detect karega Node/Deno
     """
-    deno_ok = check_deno()
-    node_ok = check_node()
     
     # ============================================
-    # BASE OPTS
+    # BASE OPTS (NO js_runtimes - auto detect)
     # ============================================
     opts = {
         "quiet": True,
@@ -327,7 +329,7 @@ def build_opts(download=False, quality="720p", use_cookies=True):
         "no_cache_dir": True,
         
         # ============================================
-        # ⚡ YOUTUBE PLAYER CLIENTS
+        # YOUTUBE PLAYER CLIENTS
         # ============================================
         "extractor_args": {
             "youtube": {
@@ -349,16 +351,6 @@ def build_opts(download=False, quality="720p", use_cookies=True):
             "Accept-Language": "en-US,en;q=0.9",
         },
     }
-    
-    # ============================================
-    # JS RUNTIME - FIXED: DICT FORMAT!
-    # ============================================
-    # yt-dlp 2026+ expects: {"runtime_name": {config}}
-    if deno_ok:
-        opts["js_runtimes"] = {"deno": {}}
-    elif node_ok:
-        opts["js_runtimes"] = {"node": {}}
-    # Agar koi bhi nahi hai toh skip — EJS challenges fail honge, but try
     
     # ============================================
     # COOKIES
@@ -404,13 +396,14 @@ def build_opts(download=False, quality="720p", use_cookies=True):
 # ==============================================
 
 def extract_info(url):
-    """Try with cookies first, then without"""
+    """Try multiple strategies"""
     attempts = [
         {"use_cookies": True, "label": "with_cookies"},
         {"use_cookies": False, "label": "without_cookies"},
     ]
     
     last_error = None
+    all_errors = []
     
     for attempt in attempts:
         try:
@@ -420,10 +413,15 @@ def extract_info(url):
                 if info and not info.get("_error"):
                     return info
         except Exception as e:
-            last_error = str(e)
+            error_msg = str(e)
+            last_error = error_msg
+            all_errors.append(f"[{attempt['label']}] {error_msg[:200]}")
             continue
     
-    return {"_error": last_error or "Failed all attempts"}
+    return {
+        "_error": last_error or "Failed all attempts",
+        "_all_errors": all_errors
+    }
 
 
 def build_full_info(info):
@@ -620,9 +618,11 @@ def process_video(url, quality="720p"):
             "status": "error",
             "error_code": "EXTRACT_FAILED",
             "message": info.get("_error", "Failed") if info else "No info",
+            "all_errors": info.get("_all_errors", []) if info else [],
             "environment": {
                 "deno": check_deno(),
                 "node": check_node(),
+                "node_path": get_node_path(),
                 "yt_dlp_version": get_ytdlp_version(),
                 "python_version": sys.version.split()[0]
             }
@@ -710,13 +710,14 @@ def home():
     
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "4.1.0",
+        "version": "4.2.0",
         "status": "active",
         "system": {
             "cookies_loaded": cookie_status,
             "cookies_message": cookie_msg,
             "deno_available": deno_ok,
             "node_available": node_ok,
+            "node_path": get_node_path(),
             "python_version": sys.version.split()[0],
             "yt_dlp_version": get_ytdlp_version()
         },
@@ -792,6 +793,7 @@ def health():
         "cookies_info": cookie_msg,
         "deno_available": deno_ok,
         "node_available": node_ok,
+        "node_path": get_node_path(),
         "yt_dlp_version": get_ytdlp_version(),
         "timestamp": datetime.now().isoformat()
     })
@@ -822,12 +824,12 @@ if __name__ == '__main__':
     node_ok = check_node()
     
     print("=" * 60)
-    print("🎬 YOUTUBE DOWNLOADER API v4.1")
+    print("🎬 YOUTUBE DOWNLOADER API v4.2")
     print("=" * 60)
     print(f"🚀 Port: {port}")
     print(f"🍪 Cookies: {cookie_msg}")
     print(f"⚙️  Deno: {'✅' if deno_ok else '❌'}")
-    print(f"📦 Node: {'✅' if node_ok else '❌'}")
+    print(f"📦 Node: {'✅' if node_ok else '❌'} ({get_node_path()})")
     print(f"📦 yt-dlp: {get_ytdlp_version()}")
     print("=" * 60)
     
