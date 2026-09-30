@@ -1,15 +1,19 @@
 services:
   - type: web
-    name: youtube-downloader-api
+    name: youtube-info
     env: python
     plan: free
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: gunicorn main:app --bind 0.0.0.0:$PORT --timeout 300 --workers 1 --threads 4
+      curl -fsSL https://deno.land/install.sh | sh
+      export DENO_INSTALL="$HOME/.deno"
+      export PATH="$DENO_INSTALL/bin:$PATH"
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 300 --workers 1 --threads 4
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
-      - key: PYTHONUNBUFFERED
-        value: 1
-    healthCheckPath: /health
+      - key: DENO_INSTALL
+        value: /opt/render/.deno
+      - key: PATH
+        value: /opt/render/.deno/bin:/usr/local/bin:/usr/bin:/bin
