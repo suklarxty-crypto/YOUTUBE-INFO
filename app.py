@@ -1,43 +1,18 @@
-# app.py - YouTube Downloader API v4.2
+# app.py - YouTube Downloader API v7.0
 # Made by @KINGFFAIAK47x · ANSH AFT
-# FIXED: js_runtimes format properly handled
+# FIXED: Format selection + client reduction
 
 from flask import Flask, jsonify, request
 import os
 import sys
 import json
 import time
-import subprocess
 import threading
 import re
 import shutil
+import subprocess
 from datetime import datetime
 from functools import wraps
-
-# ==============================================
-# INSTALL DEPENDENCIES
-# ==============================================
-
-def install_package(p):
-    try:
-        __import__(p.replace("-", "_"))
-        return True
-    except ImportError:
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", p],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            return True
-        except:
-            return False
-
-install_package("yt-dlp")
-install_package("requests")
-
-import yt_dlp
-import requests
 
 app = Flask(__name__)
 
@@ -53,13 +28,35 @@ VALID_KEYS = {
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = "/tmp/youtube_data"
 COOKIES_FILE = os.path.join(SCRIPT_DIR, "yt_cookies.txt")
-DATA_FILE = os.path.join(OUTPUT_DIR, "youtube_data.json")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# ==============================================
+# LAZY LOADERS
+# ==============================================
+
+_yt_dlp_cache = None
+_requests_cache = None
+
+
+def get_yt_dlp():
+    global _yt_dlp_cache
+    if _yt_dlp_cache is None:
+        import yt_dlp
+        _yt_dlp_cache = yt_dlp
+    return _yt_dlp_cache
+
+
+def get_requests():
+    global _requests_cache
+    if _requests_cache is None:
+        import requests
+        _requests_cache = requests
+    return _requests_cache
+
 
 # ==============================================
-# ENVIRONMENT CHECK
+# HELPERS
 # ==============================================
 
 def check_deno():
@@ -70,74 +67,34 @@ def check_node():
     return shutil.which("node") is not None
 
 
-def get_node_path():
-    return shutil.which("node")
-
-
 def get_ytdlp_version():
-    return getattr(yt_dlp.version, "__version__", "unknown")
+    try:
+        yt = get_yt_dlp()
+        return getattr(yt.version, "__version__", "unknown")
+    except:
+        return "unknown"
 
 
 def verify_cookies_file():
     if not os.path.exists(COOKIES_FILE):
         return False, "Cookie file not found"
-    
     try:
         with open(COOKIES_FILE, "r", encoding="utf-8") as f:
             content = f.read()
-        
         if "Netscape HTTP Cookie File" not in content:
-            return False, "Invalid cookie format"
-        
-        valid_count = 0
+            return False, "Invalid format"
+        valid = 0
         for line in content.split("\n"):
             line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) == 7:
-                valid_count += 1
-        
-        if valid_count < 5:
-            return False, f"Too few valid cookies: {valid_count}"
-        
-        return True, f"{valid_count} valid cookies"
+            if line and not line.startswith("#"):
+                if len(line.split("\t")) == 7:
+                    valid += 1
+        if valid < 5:
+            return False, f"Too few: {valid}"
+        return True, f"{valid} valid"
     except Exception as e:
         return False, str(e)
 
-
-# ==============================================
-# AUTHENTICATION
-# ==============================================
-
-def require_api_key(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        api_key = request.args.get('key', '').strip()
-        
-        if not api_key:
-            return jsonify({
-                "status": "error",
-                "error_code": "MISSING_API_KEY",
-                "message": "API key required",
-                "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
-            }), 401
-        
-        if api_key not in VALID_KEYS:
-            return jsonify({
-                "status": "error",
-                "error_code": "INVALID_API_KEY",
-                "message": "Invalid API key",
-                "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
-            }), 403
-        
-        return f(*args, **kwargs)
-    return decorated_function
-
-
-# ==============================================
-# HELPERS
-# ==============================================
 
 def safe_str(o, d=""):
     return d if o is None else str(o)
@@ -198,15 +155,30 @@ def fmt_num(n):
         return "N/A"
 
 
-def fmt_date(ds):
-    if not ds:
-        return "N/A"
-    for f in ["%Y%m%d", "%Y-%m-%d"]:
-        try:
-            return datetime.strptime(str(ds), f).strftime("%d %B %Y")
-        except:
-            continue
-    return str(ds)
+# ==============================================
+# AUTH
+# ==============================================
+
+def require_api_key(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        api_key = request.args.get('key', '').strip()
+        if not api_key:
+            return jsonify({
+                "status": "error",
+                "error_code": "MISSING_API_KEY",
+                "message": "API key required",
+                "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+            }), 401
+        if api_key not in VALID_KEYS:
+            return jsonify({
+                "status": "error",
+                "error_code": "INVALID_API_KEY",
+                "message": "Invalid API key",
+                "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+            }), 403
+        return f(*args, **kwargs)
+    return decorated_function
 
 
 # ==============================================
@@ -216,102 +188,53 @@ def fmt_date(ds):
 def validate_youtube_url(url):
     if not url:
         return False, "URL required"
-    
     url = str(url).strip()
     if len(url) < 10 or len(url) > 500:
-        return False, "URL length invalid"
-    
+        return False, "Invalid length"
     patterns = [
         r'^https?://(www\.)?youtube\.com/watch\?v=[\w\-]+',
         r'^https?://(www\.)?youtu\.be/[\w\-]+',
         r'^https?://(www\.)?youtube\.com/shorts/[\w\-]+',
         r'^https?://(www\.)?youtube\.com/embed/[\w\-]+',
-        r'^https?://m\.youtube\.com/watch\?v=[\w\-]+',
     ]
-    
     for p in patterns:
         if re.match(p, url):
             return True, url
-    
     return False, "Invalid YouTube URL"
 
 
-def validate_quality(quality):
-    if not quality:
+def validate_quality(q):
+    if not q:
         return "720p"
-    quality = str(quality).strip().lower()
+    q = str(q).strip().lower()
     valid = ["360p", "480p", "720p", "1080p", "best"]
-    return quality if quality in valid else "720p"
+    return q if q in valid else "720p"
 
 
 # ==============================================
-# JSON DB
+# YT-DLP OPTS - FIXED
 # ==============================================
 
-def load_db():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    if not os.path.exists(DATA_FILE):
-        return {
-            "file_info": {
-                "created_at": datetime.now().isoformat(),
-                "last_updated": datetime.now().isoformat(),
-                "total_videos": 0
-            },
-            "videos": []
-        }
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {
-            "file_info": {
-                "created_at": datetime.now().isoformat(),
-                "last_updated": datetime.now().isoformat(),
-                "total_videos": 0
-            },
-            "videos": []
-        }
-
-
-def save_db(db):
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    db["file_info"]["last_updated"] = datetime.now().isoformat()
-    db["file_info"]["total_videos"] = len(db["videos"])
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(db, f, indent=2, ensure_ascii=False)
-        return DATA_FILE
-    except:
-        return None
-
-
-def append_db(vdata):
-    db = load_db()
-    vid = vdata.get("video", {}).get("id", "")
-    replaced = False
-    for i, ex in enumerate(db["videos"]):
-        if ex.get("video", {}).get("id", "") == vid:
-            db["videos"][i] = vdata
-            replaced = True
-            break
-    if not replaced:
-        db["videos"].append(vdata)
-    return save_db(db)
-
-
-# ==============================================
-# YT-DLP OPTS - NO JS_RUNTIMES (AUTO-DETECT)
-# ==============================================
-
-def build_opts(download=False, quality="720p", use_cookies=True):
+def build_opts(download=False, quality="720p", use_cookies=True, attempt_num=1):
     """
-    yt-dlp 2026.08.19 compatible
-    JS RUNTIME: HATA DIYA — yt-dlp auto-detect karega Node/Deno
+    Fixed yt-dlp options
+    - Format string simplified
+    - Client reduced to working ones
     """
     
     # ============================================
-    # BASE OPTS (NO js_runtimes - auto detect)
+    # FORMAT STRING - SIMPLIFIED
     # ============================================
+    if quality == "best":
+        format_str = "bv*+ba/b"
+    else:
+        try:
+            h = int(str(quality).rstrip("p"))
+            # Simple format: best video+audio at height, or fallback
+            format_str = f"bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b"
+        except:
+            format_str = "bv*+ba/b"
+    
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -326,30 +249,21 @@ def build_opts(download=False, quality="720p", use_cookies=True):
         "skip_unavailable_fragments": True,
         "noprogress": True,
         "consoletitle": False,
-        "no_cache_dir": True,
         
-        # ============================================
-        # YOUTUBE PLAYER CLIENTS
-        # ============================================
+        # ⚡ SIMPLIFIED CLIENTS - Only working ones with cookies
         "extractor_args": {
             "youtube": {
-                "player_client": [
-                    "web_safari",
-                    "web",
-                    "mweb",
-                    "tv_embedded",
-                    "android_vr",
-                ],
+                "player_client": ["web", "mweb"],
             }
         },
         
-        # ============================================
-        # HTTP HEADERS
-        # ============================================
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         },
+        
+        # ⚡ FORMAT STRING
+        "format": format_str,
     }
     
     # ============================================
@@ -364,26 +278,8 @@ def build_opts(download=False, quality="720p", use_cookies=True):
     if download:
         out_dir = os.path.join(OUTPUT_DIR, "downloads")
         os.makedirs(out_dir, exist_ok=True)
-        opts["outtmpl"] = os.path.join(out_dir, "%(title)s [%(id)s].%(ext)s")
+        opts["outtmpl"] = os.path.join(out_dir, "%(title).100B [%(id)s].%(ext)s")
         opts["concurrent_fragment_downloads"] = 16
-        opts["buffersize"] = 1024 * 1024
-        opts["retries"] = 10
-        opts["fragment_retries"] = 10
-        
-        if quality == "best":
-            opts["format"] = "bestvideo+bestaudio/best"
-        else:
-            try:
-                h = int(str(quality).rstrip("p"))
-                opts["format"] = (
-                    f"best[height<={h}][ext=mp4]/"
-                    f"best[height<={h}]/"
-                    f"bestvideo[height<={h}]+bestaudio/"
-                    f"best"
-                )
-            except:
-                opts["format"] = "best[ext=mp4]/best"
-        
         opts["merge_output_format"] = "mp4"
     else:
         opts["skip_download"] = True
@@ -392,11 +288,15 @@ def build_opts(download=False, quality="720p", use_cookies=True):
 
 
 # ==============================================
-# EXTRACT INFO
+# EXTRACT
 # ==============================================
 
 def extract_info(url):
-    """Try multiple strategies"""
+    yt = get_yt_dlp()
+    if not yt:
+        return {"_error": "yt-dlp not available"}
+    
+    # Try with cookies first
     attempts = [
         {"use_cookies": True, "label": "with_cookies"},
         {"use_cookies": False, "label": "without_cookies"},
@@ -408,20 +308,17 @@ def extract_info(url):
     for attempt in attempts:
         try:
             opts = build_opts(download=False, use_cookies=attempt["use_cookies"])
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with yt.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if info and not info.get("_error"):
                     return info
         except Exception as e:
-            error_msg = str(e)
-            last_error = error_msg
-            all_errors.append(f"[{attempt['label']}] {error_msg[:200]}")
+            msg = str(e)
+            last_error = msg
+            all_errors.append(f"[{attempt['label']}] {msg[:200]}")
             continue
     
-    return {
-        "_error": last_error or "Failed all attempts",
-        "_all_errors": all_errors
-    }
+    return {"_error": last_error or "Failed", "_all_errors": all_errors}
 
 
 def build_full_info(info):
@@ -439,29 +336,15 @@ def build_full_info(info):
         "video": {
             "id": vid,
             "title": safe_str(info.get("title")),
-            "fulltitle": safe_str(info.get("fulltitle")),
             "url": safe_str(info.get("webpage_url")),
             "short_url": f"https://youtu.be/{vid}",
-            "embed_url": f"https://www.youtube.com/embed/{vid}",
-            "description": desc,
-            "description_length": len(desc),
-            "description_preview": desc[:1000],
+            "description": desc[:500],
             "thumbnail": safe_str(info.get("thumbnail")),
             "thumbnail_hd": f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg",
-            "thumbnail_sd": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
         },
         "duration": {
             "seconds": dur,
-            "string": safe_str(info.get("duration_string")),
             "formatted": fmt_dur(dur),
-            "minutes": dur // 60 if dur else 0,
-            "hours": dur // 3600 if dur else 0
-        },
-        "dates": {
-            "upload_date": safe_str(info.get("upload_date")),
-            "upload_date_formatted": fmt_date(info.get("upload_date")),
-            "release_date": safe_str(info.get("release_date")),
-            "timestamp": safe_int(info.get("timestamp"))
         },
         "engagement": {
             "view_count": vc,
@@ -469,59 +352,31 @@ def build_full_info(info):
             "like_count": lc,
             "like_count_formatted": fmt_num(lc),
             "comment_count": cc,
-            "comment_count_formatted": fmt_num(cc),
-            "average_rating": info.get("average_rating")
         },
         "channel": {
             "name": safe_str(info.get("channel")),
             "id": safe_str(info.get("channel_id")),
-            "url": safe_str(info.get("channel_url")),
-            "uploader": safe_str(info.get("uploader")),
-            "uploader_id": safe_str(info.get("uploader_id")),
-            "follower_count": safe_int(info.get("channel_follower_count")),
-            "follower_count_formatted": fmt_num(info.get("channel_follower_count"))
-        },
-        "metadata": {
-            "categories": info.get("categories") or [],
-            "tags": info.get("tags") or [],
-            "tags_count": len(info.get("tags") or []),
-            "language": safe_str(info.get("language")),
-            "age_limit": safe_int(info.get("age_limit")),
-            "availability": safe_str(info.get("availability"))
         },
         "technical": {
-            "ext": safe_str(info.get("ext")),
-            "format": safe_str(info.get("format")),
-            "format_id": safe_str(info.get("format_id")),
             "width": safe_int(info.get("width")),
             "height": safe_int(info.get("height")),
-            "fps": safe_int(info.get("fps")),
-            "vcodec": safe_str(info.get("vcodec")),
-            "acodec": safe_str(info.get("acodec")),
             "filesize": safe_int(info.get("filesize")),
             "filesize_formatted": fmt_size(info.get("filesize"))
-        },
-        "extractor": {
-            "name": safe_str(info.get("extractor")),
-            "key": safe_str(info.get("extractor_key"))
         },
         "format_count": len(info.get("formats") or [])
     }
 
 
 # ==============================================
-# UPLOAD FUNCTIONS
+# UPLOAD
 # ==============================================
 
-UPLOAD_TIMEOUT = 30
-
-
 def up_0x0(fp):
+    r_ = get_requests()
     try:
         with open(fp, "rb") as f:
-            r = requests.post("https://0x0.st", files={"file": f},
-                              headers={"User-Agent": "Mozilla/5.0"},
-                              timeout=UPLOAD_TIMEOUT)
+            r = r_.post("https://0x0.st", files={"file": f},
+                        headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
         if r.status_code == 200 and r.text.strip().startswith("http"):
             return ("0x0.st", r.text.strip())
     except:
@@ -530,11 +385,12 @@ def up_0x0(fp):
 
 
 def up_catbox(fp):
+    r_ = get_requests()
     try:
         with open(fp, "rb") as f:
-            r = requests.post("https://catbox.moe/user/api.php",
-                              data={"reqtype": "fileupload"},
-                              files={"fileToUpload": f}, timeout=UPLOAD_TIMEOUT)
+            r = r_.post("https://catbox.moe/user/api.php",
+                        data={"reqtype": "fileupload"},
+                        files={"fileToUpload": f}, timeout=30)
         if r.status_code == 200 and r.text.strip().startswith("http"):
             return ("catbox.moe", r.text.strip())
     except:
@@ -542,26 +398,13 @@ def up_catbox(fp):
     return None
 
 
-def up_tmpfiles(fp):
-    try:
-        with open(fp, "rb") as f:
-            r = requests.post("https://tmpfiles.org/api/v1/upload",
-                              files={"file": f}, timeout=UPLOAD_TIMEOUT)
-        if r.status_code == 200:
-            u = r.json().get("data", {}).get("url", "")
-            if u:
-                return ("tmpfiles.org", u.replace("tmpfiles.org/", "tmpfiles.org/dl/"))
-    except:
-        pass
-    return None
-
-
 def up_litterbox(fp):
+    r_ = get_requests()
     try:
         with open(fp, "rb") as f:
-            r = requests.post("https://litterbox.catbox.moe/resources/internals/api.php",
-                              data={"reqtype": "fileupload", "time": "1h"},
-                              files={"fileToUpload": f}, timeout=UPLOAD_TIMEOUT)
+            r = r_.post("https://litterbox.catbox.moe/resources/internals/api.php",
+                        data={"reqtype": "fileupload", "time": "1h"},
+                        files={"fileToUpload": f}, timeout=30)
         if r.status_code == 200 and r.text.strip().startswith("http"):
             return ("litterbox", r.text.strip())
     except:
@@ -589,29 +432,37 @@ def upload_parallel(fp):
             pass
     
     threads = [threading.Thread(target=worker, args=(f,), daemon=True)
-               for f in [up_0x0, up_catbox, up_tmpfiles, up_litterbox]]
+               for f in [up_0x0, up_catbox, up_litterbox]]
     for t in threads:
         t.start()
     
     start = time.time()
-    while time.time() - start < UPLOAD_TIMEOUT:
+    while time.time() - start < 30:
         if res["url"]:
             break
         if all(not t.is_alive() for t in threads):
             break
-        time.sleep(0.05)
+        time.sleep(0.1)
     
     return res
 
 
 # ==============================================
-# PROCESS VIDEO
+# PROCESS
 # ==============================================
 
 def process_video(url, quality="720p"):
+    yt = get_yt_dlp()
+    if not yt:
+        return {
+            "status": "error",
+            "error_code": "YTDLP_NOT_AVAILABLE",
+            "message": "yt-dlp not loaded"
+        }
+    
     t_start = time.time()
     
-    t0 = time.time()
+    # Step 1: Extract info
     info = extract_info(url)
     if not info or info.get("_error"):
         return {
@@ -622,23 +473,19 @@ def process_video(url, quality="720p"):
             "environment": {
                 "deno": check_deno(),
                 "node": check_node(),
-                "node_path": get_node_path(),
-                "yt_dlp_version": get_ytdlp_version(),
-                "python_version": sys.version.split()[0]
+                "yt_dlp_version": get_ytdlp_version()
             }
         }
     
-    info_time = round(time.time() - t0, 2)
     full = build_full_info(info)
     
-    t0 = time.time()
+    # Step 2: Download
     dl_data = {"status": "failed"}
-    share_url = None
     fname = None
     
     try:
         opts = build_opts(download=True, quality=quality, use_cookies=True)
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt.YoutubeDL(opts) as ydl:
             dl_info = ydl.extract_info(url, download=True)
             fname = ydl.prepare_filename(dl_info)
             if not os.path.exists(fname):
@@ -648,12 +495,9 @@ def process_video(url, quality="720p"):
                         fname = base + ext
                         break
         
-        dl_time = round(time.time() - t0, 2)
-        
         if fname and os.path.exists(fname):
             size = os.path.getsize(fname)
             up_res = upload_parallel(fname)
-            share_url = up_res.get("url")
             
             dl_data = {
                 "status": "success",
@@ -661,12 +505,9 @@ def process_video(url, quality="720p"):
                 "file_size": size,
                 "file_size_formatted": fmt_size(size),
                 "quality": quality,
-                "download_time": f"{dl_time}s",
-                "share_url": share_url or "UPLOAD_FAILED",
+                "share_url": up_res.get("url") or "UPLOAD_FAILED",
                 "upload_host": up_res.get("host") or "N/A"
             }
-        else:
-            dl_data = {"status": "failed", "error": "File not found"}
     except Exception as ex:
         dl_data = {"status": "failed", "error": str(ex)[:200]}
     
@@ -675,22 +516,12 @@ def process_video(url, quality="720p"):
     return {
         "status": "success",
         "total_time": f"{total_time}s",
-        "info_time": f"{info_time}s",
         "download": dl_data,
         "video": full.get("video", {}),
         "duration": full.get("duration", {}),
-        "dates": full.get("dates", {}),
         "engagement": full.get("engagement", {}),
         "channel": full.get("channel", {}),
-        "metadata": full.get("metadata", {}),
         "technical": full.get("technical", {}),
-        "extractor": full.get("extractor", {}),
-        "formats_count": full.get("format_count", 0),
-        "environment": {
-            "deno": check_deno(),
-            "node": check_node(),
-            "yt_dlp_version": get_ytdlp_version()
-        },
         "credit": {
             "username": "@KINGFFAIAK47x",
             "made_by": "ANSH AFT"
@@ -702,36 +533,26 @@ def process_video(url, quality="720p"):
 # ENDPOINTS
 # ==============================================
 
-@app.route('/', methods=['GET'])
+@app.route('/', methods=['GET', 'HEAD'])
 def home():
     cookie_status, cookie_msg = verify_cookies_file()
-    deno_ok = check_deno()
-    node_ok = check_node()
-    
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "4.2.0",
+        "version": "7.0.0",
         "status": "active",
-        "system": {
-            "cookies_loaded": cookie_status,
-            "cookies_message": cookie_msg,
-            "deno_available": deno_ok,
-            "node_available": node_ok,
-            "node_path": get_node_path(),
-            "python_version": sys.version.split()[0],
-            "yt_dlp_version": get_ytdlp_version()
-        },
-        "endpoint": {
-            "/yt": {
-                "method": "GET",
-                "example": "/yt?url=YOUTUBE_URL&quality=720p&key=FF"
-            }
-        },
-        "credit": {
-            "username": "@KINGFFAIAK47x",
-            "made_by": "ANSH AFT"
-        }
-    })
+        "cookies_loaded": cookie_status,
+        "cookies_message": cookie_msg,
+        "endpoint": "/yt?url=YOUTUBE_URL&quality=720p&key=FF",
+        "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+    }), 200
+
+
+@app.route('/health', methods=['GET', 'HEAD'])
+def health():
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    }), 200
 
 
 @app.route('/yt', methods=['GET'])
@@ -760,14 +581,9 @@ def download_yt():
     url = result
     quality = validate_quality(quality)
     
-    start_time = time.time()
-    
     try:
         result = process_video(url, quality)
-        elapsed = round((time.time() - start_time) * 1000, 2)
-        result["response_time"] = f"{elapsed}ms"
         result["credit"] = {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
-        
         if result.get("status") == "success":
             return jsonify(result), 200
         else:
@@ -781,56 +597,21 @@ def download_yt():
         }), 500
 
 
-@app.route('/health', methods=['GET'])
-def health():
-    cookie_status, cookie_msg = verify_cookies_file()
-    deno_ok = check_deno()
-    node_ok = check_node()
-    
-    return jsonify({
-        "status": "healthy",
-        "cookies_loaded": cookie_status,
-        "cookies_info": cookie_msg,
-        "deno_available": deno_ok,
-        "node_available": node_ok,
-        "node_path": get_node_path(),
-        "yt_dlp_version": get_ytdlp_version(),
-        "timestamp": datetime.now().isoformat()
-    })
-
-
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({
-        "status": "error",
-        "message": "Use /yt endpoint",
-        "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
-    }), 404
+    return jsonify({"status": "error", "message": "Use /yt"}), 404
 
 
 @app.errorhandler(500)
 def internal_error(error):
-    return jsonify({
-        "status": "error",
-        "message": "Internal server error",
-        "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
-    }), 500
+    return jsonify({"status": "error", "message": "Internal error"}), 500
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    cookie_status, cookie_msg = verify_cookies_file()
-    deno_ok = check_deno()
-    node_ok = check_node()
-    
     print("=" * 60)
-    print("🎬 YOUTUBE DOWNLOADER API v4.2")
+    print("🎬 YOUTUBE DOWNLOADER API v7.0")
     print("=" * 60)
     print(f"🚀 Port: {port}")
-    print(f"🍪 Cookies: {cookie_msg}")
-    print(f"⚙️  Deno: {'✅' if deno_ok else '❌'}")
-    print(f"📦 Node: {'✅' if node_ok else '❌'} ({get_node_path()})")
-    print(f"📦 yt-dlp: {get_ytdlp_version()}")
     print("=" * 60)
-    
     app.run(host='0.0.0.0', port=port, debug=False)
