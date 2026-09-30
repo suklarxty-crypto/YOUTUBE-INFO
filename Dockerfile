@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # ⚡ Install yt-dlp with EJS scripts (critical for YouTube)
-RUN pip3 install --break-system-packages "yt-dlp[default]" \
+# YE LINE CHANGE KI HAI - bgutil plugin bhi install hoga
+RUN pip3 install --break-system-packages "yt-dlp[default]" bgutil-ytdlp-pot-provider \
     && yt-dlp --version
 
 # Deno install (JS runtime for EJS challenges)
@@ -47,7 +48,12 @@ COPY yt_cookies.txt .
 
 EXPOSE 10000
 
-# Start script: POT server + gunicorn
+# ⚡ Start script: POT server + gunicorn with proper timeout and logging
+# YAHAN CHANGE KIYA HAI:
+# - timeout 600 → 120 (Render 100s pe kill karta hai)
+# - threads 8 → 4 (memory bachao)
+# - max-requests 500 (memory leak prevent)
+# - access-logfile + error-logfile (debugging ke liye)
 RUN printf '#!/bin/bash\n\
 set -e\n\
 echo "🚀 Starting POT server on port 4416..."\n\
@@ -63,7 +69,17 @@ for i in {1..15}; do\n\
   sleep 2\n\
 done\n\
 echo "🎬 Starting gunicorn..."\n\
-exec gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600 --workers 1 --threads 8\n\
+exec gunicorn app:app \\\n\
+  --bind 0.0.0.0:$PORT \\\n\
+  --timeout 120 \\\n\
+  --workers 1 \\\n\
+  --threads 4 \\\n\
+  --worker-class gthread \\\n\
+  --max-requests 500 \\\n\
+  --max-requests-jitter 50 \\\n\
+  --access-logfile - \\\n\
+  --error-logfile - \\\n\
+  --log-level info\n\
 ' > /app/start.sh && chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]
