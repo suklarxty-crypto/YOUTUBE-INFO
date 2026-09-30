@@ -1,6 +1,6 @@
-# app.py - YouTube Downloader API v21.0 ULTRA-STABLE
+# app.py - YouTube Downloader API v22.0 STABLE
 # Made by @KINGFFAIAK47x · ANSH AFT
-# 502 FIXED + FULL ERROR DETECTION + EXACT FLAT RESPONSE
+# POT DISABLED + URL VALIDATION + VIDEO EXIST CHECK
 
 import os
 import sys
@@ -15,9 +15,7 @@ from datetime import datetime
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ==============================================
-# ENV VARS (after imports)
-# ==============================================
+# ENV vars
 os.environ["YTDLP_NO_PLUGIN_LOAD"] = "1"
 os.environ["YT_DLP_NO_PLUGINS"] = "1"
 os.environ["PYTHONWARNINGS"] = "ignore"
@@ -28,8 +26,9 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
 # ==============================================
-# GLOBAL ERROR LOG (for debugging)
+# STARTUP LOG
 # ==============================================
+
 _STARTUP_LOG = []
 _STARTUP_TIME = datetime.now().isoformat()
 
@@ -43,18 +42,13 @@ def log_event(msg, level="INFO"):
 
 
 # ==============================================
-# CONFIG (with try/except - NEVER crash at import)
+# CONFIG
 # ==============================================
 
-try:
-    VALID_KEYS = {
-        "AK$&FF": "full_access",
-        "FF": "full_access"
-    }
-    log_event("Config loaded")
-except Exception as e:
-    log_event(f"CONFIG ERROR: {e}", "ERROR")
-    VALID_KEYS = {"FF": "full_access"}
+VALID_KEYS = {
+    "AK$&FF": "full_access",
+    "FF": "full_access"
+}
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = "/tmp/youtube_data"
@@ -65,9 +59,8 @@ COOKIES_FILE = "/tmp/yt_cookies.txt"
 try:
     if os.path.exists(COOKIES_SRC):
         shutil.copy2(COOKIES_SRC, COOKIES_FILE)
-        log_event("Cookies copied")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    log_event("Output dir ready")
+    log_event("Config loaded")
 except Exception as e:
     log_event(f"FS ERROR: {e}", "ERROR")
 
@@ -83,25 +76,15 @@ PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
 USE_PROXY = True
 
 # ==============================================
-# THREADS / CACHE (safe limits)
+# THREADS / CACHE
 # ==============================================
 
-try:
-    _EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="yt_")
-    log_event("ThreadPool ready")
-except Exception as e:
-    log_event(f"THREADPOOL ERROR: {e}", "ERROR")
-    _EXECUTOR = None
-
+_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="yt_")
 _INFO_CACHE = {}
 _CACHE_LOCK = threading.Lock()
 CACHE_TTL = 300
 
-_POT_CACHE = {"checked": 0, "available": False}
-_POT_LOCK = threading.Lock()
-
-MAX_TOTAL_TIME = 80
-GUNICORN_TIMEOUT = 120
+MAX_TOTAL_TIME = 75
 
 # ==============================================
 # LAZY LOADERS
@@ -149,17 +132,8 @@ def check_ffmpeg():
 
 
 def check_pot_server():
-    with _POT_LOCK:
-        now = time.time()
-        if now - _POT_CACHE["checked"] < 60:
-            return _POT_CACHE["available"]
-        try:
-            r = get_requests().get("http://127.0.0.1:4416/ping", timeout=0.5)
-            _POT_CACHE["available"] = (r.status_code == 200)
-        except Exception:
-            _POT_CACHE["available"] = False
-        _POT_CACHE["checked"] = now
-        return _POT_CACHE["available"]
+    # POT server DISABLED - cookies + proxy kaafi hai
+    return False
 
 
 def safe_str(o, d=""):
@@ -282,25 +256,64 @@ def require_api_key(f):
 
 
 # ==============================================
-# VALIDATION
+# URL VALIDATION (STRICT)
 # ==============================================
 
 def validate_youtube_url(url):
+    """
+    Validate YouTube URL and extract video ID.
+    Returns: (is_valid, video_id_or_error_message)
+    """
     if not url:
         return False, "URL required"
+    
     url = str(url).strip()
+    
     if len(url) < 10 or len(url) > 500:
-        return False, "Invalid length"
+        return False, "URL length invalid (must be 10-500 chars)"
+    
+    # YouTube URL patterns with video ID capture
     patterns = [
-        r'^https?://(www\.)?youtube\.com/watch\?v=[\w\-]+',
-        r'^https?://(www\.)?youtu\.be/[\w\-]+',
-        r'^https?://(www\.)?youtube\.com/shorts/[\w\-]+',
-        r'^https?://(www\.)?youtube\.com/embed/[\w\-]+',
+        (r'^https?://(www\.)?youtube\.com/watch\?v=([\w\-]{11})', 'watch'),
+        (r'^https?://(www\.)?youtu\.be/([\w\-]{11})', 'short'),
+        (r'^https?://(www\.)?youtube\.com/shorts/([\w\-]{11})', 'shorts'),
+        (r'^https?://(www\.)?youtube\.com/embed/([\w\-]{11})', 'embed'),
+        (r'^https?://m\.youtube\.com/watch\?v=([\w\-]{11})', 'mobile'),
+        (r'^https?://music\.youtube\.com/watch\?v=([\w\-]{11})', 'music'),
     ]
+    
+    for pattern, _ in patterns:
+        match = re.match(pattern, url)
+        if match:
+            # Extract video ID (last group)
+            video_id = match.groups()[-1]
+            return True, video_id
+    
+    # Check if it's a YouTube URL but invalid format
+    if 'youtube.com' in url or 'youtu.be' in url:
+        return False, "Invalid YouTube URL format. Video ID must be 11 characters."
+    
+    return False, "Not a YouTube URL. Must be youtube.com or youtu.be"
+
+
+def extract_video_id(url):
+    """Extract just the video ID from any YouTube URL."""
+    if not url:
+        return None
+    
+    url = str(url).strip()
+    
+    patterns = [
+        r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/embed/)([\w\-]{11})',
+        r'^([\w\-]{11})$',
+    ]
+    
     for p in patterns:
-        if re.match(p, url):
-            return True, url
-    return False, "Invalid YouTube URL"
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    
+    return None
 
 
 def validate_quality(q):
@@ -347,7 +360,7 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
         "extractor_args": {
             "youtube": {
                 "player_client": ["tv", "web", "mweb", "android"],
-                "fetch_pot": ["auto"],
+                "fetch_pot": ["never"],  # POT disabled
             },
         },
         "no_call_home": True,
@@ -372,10 +385,7 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
     elif check_node():
         opts["js_runtimes"] = {"node": {}}
     
-    if check_pot_server():
-        opts["extractor_args"]["youtubepot-bgutilhttp"] = {
-            "base_url": "http://127.0.0.1:4416"
-        }
+    # POT server disabled - not adding extractor_arg
     
     if USE_PROXY and not no_proxy:
         opts["proxy"] = PROXY_URL
@@ -418,7 +428,7 @@ def verify_video_exists(info):
         return False, "Invalid webpage URL"
     formats = info.get("formats")
     if not formats or not isinstance(formats, list) or len(formats) == 0:
-        return False, "No formats"
+        return False, "No formats available"
     return True, "Verified"
 
 
@@ -497,41 +507,31 @@ def extract_info(url):
         return {"_error": "yt-dlp not available", "_verified": False}
     
     attempts = [
-        {"use_cookies": True, "no_proxy": False, "label": "ck+px", "timeout": 12},
+        {"use_cookies": True, "no_proxy": False, "label": "ck+px", "timeout": 15},
+        {"use_cookies": True, "no_proxy": True, "label": "ck", "timeout": 15},
         {"use_cookies": False, "no_proxy": False, "label": "px", "timeout": 12},
-        {"use_cookies": True, "no_proxy": True, "label": "ck", "timeout": 10},
     ]
     
     all_errors = []
     winner = None
     
-    if _EXECUTOR is None:
-        # Fallback: sequential
-        for a in attempts:
-            info, err = _extract_attempt(url, a)
-            if info:
-                winner = info
-                break
-            elif err:
-                all_errors.append(err)
-    else:
-        try:
-            futures = {_EXECUTOR.submit(_extract_attempt, url, a): a for a in attempts}
-            for fut in as_completed(futures, timeout=20):
-                try:
-                    info, err = fut.result(timeout=1)
-                    if info and not winner:
-                        winner = info
-                        for f in futures:
-                            if not f.done():
-                                f.cancel()
-                        break
-                    elif err:
-                        all_errors.append(err)
-                except Exception as e:
-                    all_errors.append(str(e)[:100])
-        except Exception as e:
-            all_errors.append(f"Parallel timeout: {e}")
+    try:
+        futures = {_EXECUTOR.submit(_extract_attempt, url, a): a for a in attempts}
+        for fut in as_completed(futures, timeout=45):
+            try:
+                info, err = fut.result(timeout=1)
+                if info and not winner:
+                    winner = info
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    break
+                elif err:
+                    all_errors.append(err)
+            except Exception as e:
+                all_errors.append(str(e)[:100])
+    except Exception as e:
+        all_errors.append(f"Parallel timeout: {e}")
     
     if winner:
         winner["_verified"] = True
@@ -818,10 +818,88 @@ def upload_parallel(fp):
 
 
 # ==============================================
-# PROCESS VIDEO - WITH FULL ERROR DETECTION
+# CHECK VIDEO EXISTS (BEFORE DOWNLOAD)
 # ==============================================
 
-def process_video(url, quality="720p"):
+def check_video_exists(url, video_id):
+    """
+    Quick check if video exists before downloading.
+    Returns: (exists: bool, info_or_error)
+    """
+    yt = get_yt_dlp()
+    if not yt:
+        return False, {"error": "yt-dlp not available"}
+    
+    try:
+        # Use 'flat' extraction - much faster, just checks metadata
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "nocheckcertificate": True,
+            "socket_timeout": 10,
+            "retries": 0,
+            "extract_flat": True,
+            "skip_download": True,
+        }
+        
+        if USE_PROXY:
+            opts["proxy"] = PROXY_URL
+        
+        if os.path.exists(COOKIES_FILE):
+            opts["cookiefile"] = COOKIES_FILE
+        
+        with yt.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            if not info:
+                return False, {"error": "Video not found"}
+            
+            # Check if YouTube returned error
+            if info.get("_error"):
+                return False, {"error": info["_error"]}
+            
+            # Verify video ID matches
+            returned_id = info.get("id")
+            if returned_id != video_id:
+                return False, {"error": f"Video ID mismatch: expected {video_id}, got {returned_id}"}
+            
+            # Check title exists
+            if not info.get("title"):
+                return False, {"error": "Video has no title (may be deleted or private)"}
+            
+            # Check availability
+            availability = info.get("availability", "public")
+            if availability in ("private", "premium_only", "subscriber_only"):
+                return False, {"error": f"Video is {availability}"}
+            
+            return True, info
+    
+    except Exception as e:
+        err_msg = str(e)
+        # Detect specific errors
+        if "Video unavailable" in err_msg:
+            return False, {"error": "Video unavailable", "error_code": "VIDEO_UNAVAILABLE"}
+        if "Private video" in err_msg:
+            return False, {"error": "Private video", "error_code": "PRIVATE_VIDEO"}
+        if "This video has been removed" in err_msg:
+            return False, {"error": "Video removed", "error_code": "VIDEO_REMOVED"}
+        if "This video is not available" in err_msg:
+            return False, {"error": "Video not available in your region", "error_code": "REGION_BLOCKED"}
+        if "copyright" in err_msg.lower():
+            return False, {"error": "Video blocked by copyright", "error_code": "COPYRIGHT"}
+        if "Sign in to confirm" in err_msg:
+            return False, {"error": "YouTube bot check - cookies need refresh", "error_code": "BOT_CHECK"}
+        if "Unable to extract" in err_msg:
+            return False, {"error": "Cannot extract video info", "error_code": "EXTRACT_ERROR"}
+        
+        return False, {"error": err_msg[:200], "error_code": "UNKNOWN"}
+
+
+# ==============================================
+# PROCESS VIDEO
+# ==============================================
+
+def process_video(url, quality="720p", video_id=None):
     errors = []
     yt = None
     
@@ -832,7 +910,6 @@ def process_video(url, quality="720p"):
             "status": "error",
             "error_code": "YTDLP_IMPORT_ERROR",
             "message": f"yt-dlp import failed: {str(e)[:200]}",
-            "traceback": traceback.format_exc()[:500],
             "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
         }
     
@@ -846,6 +923,28 @@ def process_video(url, quality="720p"):
     
     t_start = time.time()
     
+    # ==========================================
+    # STEP 1: CHECK VIDEO EXISTS (FAST)
+    # ==========================================
+    if video_id:
+        exists, check_result = check_video_exists(url, video_id)
+        
+        if not exists:
+            total_time = round(time.time() - t_start, 2)
+            return {
+                "status": "error",
+                "error_code": check_result.get("error_code", "VIDEO_NOT_FOUND"),
+                "message": check_result.get("error", "Video does not exist"),
+                "video_id": video_id,
+                "source_url": url,
+                "total_time": f"{total_time}s",
+                "hint": "Check if the video URL is correct and video is public",
+                "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+            }
+    
+    # ==========================================
+    # STEP 2: PARALLEL DOWNLOAD + INFO
+    # ==========================================
     dl_result = {"status": "pending"}
     info_result = {"info": None}
     dl_lock = threading.Lock()
@@ -916,7 +1015,6 @@ def process_video(url, quality="720p"):
                 info_result["info"] = {
                     "_error": str(e)[:200],
                     "_verified": False,
-                    "_traceback": traceback.format_exc()[:500]
                 }
     
     t_dl = threading.Thread(target=do_download, daemon=True)
@@ -927,9 +1025,6 @@ def process_video(url, quality="720p"):
     
     t_dl.join(timeout=MAX_TOTAL_TIME - 15)
     t_info.join(timeout=15)
-    
-    dl_alive = t_dl.is_alive()
-    info_alive = t_info.is_alive()
     
     info = info_result.get("info")
     
@@ -942,8 +1037,6 @@ def process_video(url, quality="720p"):
             "error_code": "EXTRACT_FAILED",
             "message": (info.get("_error", "Failed") if info else "No info returned"),
             "all_errors": (info.get("_all_errors", []) if info else []),
-            "info_thread_alive": info_alive,
-            "download_thread_alive": dl_alive,
             "debug_info": {
                 "deno": check_deno(),
                 "node": check_node(),
@@ -958,7 +1051,6 @@ def process_video(url, quality="720p"):
     full = build_full_info(info)
     total_time = round(time.time() - t_start, 2)
     
-    # ⚡ EXACT FLAT STRUCTURE
     return {
         "status": "success",
         "total_time": f"{total_time}s",
@@ -988,12 +1080,10 @@ def process_video(url, quality="720p"):
 
 @app.route('/', methods=['GET', 'HEAD'])
 def home():
-    """INSTANT - no blocking checks"""
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "21.0.0",
+        "version": "22.0.0",
         "description": "Download YouTube videos and get complete info in one request",
-        "started_at": _STARTUP_TIME,
         "endpoints": {
             "/yt": {
                 "method": "GET",
@@ -1003,15 +1093,15 @@ def home():
             },
             "/health": {
                 "method": "GET",
-                "description": "Health check with full system status"
+                "description": "Health check"
             },
             "/debug": {
                 "method": "GET",
-                "description": "Full debug info (env, logs, threads)"
+                "description": "Debug info"
             },
             "/ping": {
                 "method": "GET",
-                "description": "Simple ping - instant"
+                "description": "Simple ping"
             }
         },
         "credit": {
@@ -1023,47 +1113,32 @@ def home():
 
 @app.route('/ping', methods=['GET', 'HEAD'])
 def ping():
-    """SUPER FAST - for Render healthcheck"""
     return "pong", 200
 
 
 @app.route('/health', methods=['GET', 'HEAD'])
 def health():
-    """FAST - basic checks with safe timeouts"""
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "started_at": _STARTUP_TIME,
-        "checks": {
-            "deno": check_deno(),
-            "node": check_node(),
-            "ffmpeg": check_ffmpeg(),
-            "pot_server": check_pot_server(),
-            "cookies_file": os.path.exists(COOKIES_FILE),
-            "output_dir": os.path.exists(OUTPUT_DIR),
-            "threadpool": _EXECUTOR is not None,
-        },
+        "pot_server": False,
+        "cookies_file": os.path.exists(COOKIES_FILE),
+        "cookies_size": os.path.getsize(COOKIES_FILE) if os.path.exists(COOKIES_FILE) else 0,
     }), 200
 
 
 @app.route('/debug', methods=['GET', 'HEAD'])
 def debug():
-    """FULL DEBUG INFO - helps find 502 cause"""
     cookie_status = os.path.exists(COOKIES_FILE)
     cookie_size = os.path.getsize(COOKIES_FILE) if cookie_status else 0
     
     return jsonify({
         "status": "ok",
-        "version": "21.0.0",
+        "version": "22.0.0",
         "started_at": _STARTUP_TIME,
         "now": datetime.now().isoformat(),
-        "python": sys.version,
-        "platform": sys.platform,
         "pid": os.getpid(),
-        "env": {
-            "PORT": os.environ.get("PORT"),
-            "WEB_CONCURRENCY": os.environ.get("WEB_CONCURRENCY"),
-        },
         "system": {
             "deno": check_deno(),
             "node": check_node(),
@@ -1071,23 +1146,16 @@ def debug():
             "pot_server": check_pot_server(),
             "cookies_exists": cookie_status,
             "cookies_size": cookie_size,
-            "cookies_path": COOKIES_FILE,
             "output_dir": os.path.exists(OUTPUT_DIR),
             "threadpool": _EXECUTOR is not None,
         },
-        "cache": {
-            "entries": len(_INFO_CACHE),
-            "ttl": CACHE_TTL,
-        },
+        "cache": {"entries": len(_INFO_CACHE)},
         "threads": {
             "active": threading.active_count(),
             "names": [t.name for t in threading.enumerate()],
         },
         "logs": _STARTUP_LOG[-50:],
-        "credit": {
-            "username": "@KINGFFAIAK47x",
-            "made_by": "ANSH AFT"
-        }
+        "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
     }), 200
 
 
@@ -1095,35 +1163,49 @@ def debug():
 @require_api_key
 def download_yt():
     try:
-        url = request.args.get('url', '').strip()
+        url_raw = request.args.get('url', '').strip()
         quality = request.args.get('quality', '720p').strip()
         
-        if not url:
+        if not url_raw:
             return jsonify({
                 "status": "error",
                 "error_code": "MISSING_URL",
-                "message": "YouTube URL required",
+                "message": "YouTube URL required. Format: /yt?url=https://youtu.be/VIDEO_ID&quality=720p&key=FF",
                 "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
             }), 400
         
-        is_valid, result = validate_youtube_url(url)
+        # ==========================================
+        # STRICT URL VALIDATION
+        # ==========================================
+        is_valid, result = validate_youtube_url(url_raw)
+        
         if not is_valid:
             return jsonify({
                 "status": "error",
                 "error_code": "INVALID_URL",
                 "message": result,
+                "url_received": url_raw,
+                "hint": "Provide a valid YouTube URL like: https://youtu.be/VIDEO_ID or https://youtube.com/watch?v=VIDEO_ID",
                 "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
             }), 400
         
-        url = result
+        video_id = result  # video ID extracted
+        # Build clean URL from video ID
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        
         quality = validate_quality(quality)
         
-        result = process_video(url, quality)
-        result["credit"] = {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
-        if result.get("status") in ("success", "partial"):
-            return jsonify(result), 200
+        # ==========================================
+        # PROCESS VIDEO
+        # ==========================================
+        result_data = process_video(url, quality, video_id=video_id)
+        result_data["credit"] = {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+        
+        if result_data.get("status") in ("success", "partial"):
+            return jsonify(result_data), 200
         else:
-            return jsonify(result), 400
+            return jsonify(result_data), 400
+    
     except Exception as e:
         return jsonify({
             "status": "error",
@@ -1136,7 +1218,7 @@ def download_yt():
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({"status": "error", "message": "Use /yt or /health or /debug"}), 404
+    return jsonify({"status": "error", "message": "Endpoint not found. Use /yt"}), 404
 
 
 @app.errorhandler(500)
@@ -1146,24 +1228,19 @@ def internal_error(error):
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    """Catch ALL exceptions - never return 502"""
     return jsonify({
         "status": "error",
         "error_code": "UNHANDLED_EXCEPTION",
         "message": str(e)[:300],
-        "traceback": traceback.format_exc()[:800],
         "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
     }), 500
 
 
-# Startup log
+# Startup
 log_event("=" * 60)
-log_event("YouTube Downloader API v21.0 STARTED")
-log_event(f"Python: {sys.version.split()[0]}")
-log_event(f"Deno: {check_deno()}")
-log_event(f"Node: {check_node()}")
-log_event(f"FFmpeg: {check_ffmpeg()}")
-log_event(f"ThreadPool: {_EXECUTOR is not None}")
+log_event("YouTube Downloader API v22.0 STARTED")
+log_event(f"Deno: {check_deno()}, Node: {check_node()}, FFmpeg: {check_ffmpeg()}")
+log_event("POT server: DISABLED (cookies + proxy only)")
 log_event("=" * 60)
 
 
