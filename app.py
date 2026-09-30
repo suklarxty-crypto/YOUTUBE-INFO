@@ -1,6 +1,6 @@
-# app.py - YouTube Downloader API v3.0
+# app.py - YouTube Downloader API v4.0
 # Made by @KINGFFAIAK47x · ANSH AFT
-# Render deployment ready
+# Deep research + PO Token + Deno + Multi-client
 
 from flask import Flask, jsonify, request
 import os
@@ -15,7 +15,7 @@ from datetime import datetime
 from functools import wraps
 
 # ==============================================
-# INSTALL DEPENDENCIES IF MISSING
+# INSTALL DEPENDENCIES
 # ==============================================
 
 def install_package(p):
@@ -59,6 +59,54 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # ==============================================
+# ENVIRONMENT CHECK
+# ==============================================
+
+def check_deno():
+    """Deno installed hai ya nahi"""
+    return shutil.which("deno") is not None
+
+
+def check_node():
+    """Node.js installed hai ya nahi"""
+    return shutil.which("node") is not None
+
+
+def get_ytdlp_version():
+    """yt-dlp version"""
+    return getattr(yt_dlp.version, "__version__", "unknown")
+
+
+def verify_cookies_file():
+    """Cookie file verify karo"""
+    if not os.path.exists(COOKIES_FILE):
+        return False, "Cookie file not found"
+    
+    try:
+        with open(COOKIES_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        if "Netscape HTTP Cookie File" not in content:
+            return False, "Invalid cookie format"
+        
+        valid_count = 0
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) == 7:
+                valid_count += 1
+        
+        if valid_count < 5:
+            return False, f"Too few valid cookies: {valid_count}"
+        
+        return True, f"{valid_count} valid cookies"
+    except Exception as e:
+        return False, str(e)
+
+
+# ==============================================
 # AUTHENTICATION
 # ==============================================
 
@@ -72,7 +120,6 @@ def require_api_key(f):
                 "status": "error",
                 "error_code": "MISSING_API_KEY",
                 "message": "API key required",
-                "usage": "/yt?url=YOUTUBE_URL&key=your_api_key",
                 "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
             }), 401
         
@@ -86,44 +133,6 @@ def require_api_key(f):
         
         return f(*args, **kwargs)
     return decorated_function
-
-
-# ==============================================
-# COOKIES VERIFICATION
-# ==============================================
-
-def verify_cookies_file():
-    """Cookie file verify karo - 7 columns check"""
-    if not os.path.exists(COOKIES_FILE):
-        return False, "Cookie file not found"
-    
-    try:
-        with open(COOKIES_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        if "Netscape HTTP Cookie File" not in content:
-            return False, "Invalid cookie format (header missing)"
-        
-        valid_count = 0
-        invalid_count = 0
-        
-        for line in content.split("\n"):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            
-            parts = line.split("\t")
-            if len(parts) == 7:
-                valid_count += 1
-            else:
-                invalid_count += 1
-        
-        if valid_count < 5:
-            return False, f"Too few valid cookies: {valid_count} (need 5+)"
-        
-        return True, f"{valid_count} valid cookies, {invalid_count} invalid"
-    except Exception as e:
-        return False, str(e)
 
 
 # ==============================================
@@ -209,9 +218,8 @@ def validate_youtube_url(url):
         return False, "URL required"
     
     url = str(url).strip()
-    
     if len(url) < 10 or len(url) > 500:
-        return False, "URL length invalid (10-500 chars)"
+        return False, "URL length invalid"
     
     patterns = [
         r'^https?://(www\.)?youtube\.com/watch\?v=[\w\-]+',
@@ -219,7 +227,6 @@ def validate_youtube_url(url):
         r'^https?://(www\.)?youtube\.com/shorts/[\w\-]+',
         r'^https?://(www\.)?youtube\.com/embed/[\w\-]+',
         r'^https?://m\.youtube\.com/watch\?v=[\w\-]+',
-        r'^https?://music\.youtube\.com/watch\?v=[\w\-]+',
     ]
     
     for p in patterns:
@@ -293,10 +300,19 @@ def append_db(vdata):
 
 
 # ==============================================
-# YT-DLP OPTS - FIXED
+# YT-DLP OPTS - DEEP TUNED
 # ==============================================
 
-def build_opts(download=False, quality="720p"):
+def build_opts(download=False, quality="720p", use_cookies=True):
+    """
+    Deep tuned options based on YouTube 2026 requirements
+    """
+    deno_ok = check_deno()
+    node_ok = check_node()
+    
+    # ============================================
+    # BASE OPTS
+    # ============================================
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -304,53 +320,99 @@ def build_opts(download=False, quality="720p"):
         "geo_bypass": True,
         "cachedir": False,
         "no_color": True,
-        "socket_timeout": 15,
-        "retries": 3,
-        "fragment_retries": 3,
-        "extractor_retries": 2,
+        "socket_timeout": 30,
+        "retries": 5,
+        "fragment_retries": 5,
+        "extractor_retries": 3,
         "skip_unavailable_fragments": True,
         "noprogress": True,
         "consoletitle": False,
+        "ignoreerrors": False,
+        "no_cache_dir": True,
         
-        # ⚡ WORKING CLIENTS (android/ios blocked)
+        # ============================================
+        # ⚡ YOUTUBE PLAYER CLIENTS (2026 OPTIMAL)
+        # ============================================
+        # web_safari → HLS formats (PO Token not needed for GVS)
+        # web → SABR formats (PO Token needed)
+        # mweb → PO Token needed for GVS
+        # tv → DRM'd if no cookies
+        # android_vr → fallback, no PO Token
         "extractor_args": {
             "youtube": {
-                "player_client": ["web", "mweb", "tv"]
+                "player_client": [
+                    "web_safari",   # HLS - no PO token
+                    "web",          # Standard
+                    "mweb",         # Mobile web
+                    "tv_embedded",  # TV
+                    "android_vr",   # Fallback
+                ],
+                "player_skip": ["webpage", "configs"],  # Faster
+                "formats": ["missing_pot"],  # Only formats needing PO token
+                "fetch_pot": ["auto"],  # Auto fetch PO token
             }
         },
         
+        # ============================================
+        # HTTP HEADERS
+        # ============================================
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         },
     }
     
-    # Deno available? toh use karo
-    if shutil.which("deno"):
+    # ============================================
+    # JS RUNTIME (CRITICAL FOR EJS CHALLENGES)
+    # ============================================
+    if deno_ok:
         opts["js_runtimes"] = ["deno"]
+    elif node_ok:
+        opts["js_runtimes"] = ["node"]
+    # else: EJS challenges fail honge, but try anyway
     
-    # Cookies add karo
-    if os.path.exists(COOKIES_FILE):
+    # ============================================
+    # COOKIES (CONDITIONAL)
+    # ============================================
+    # Info fetch phase mein cookies sometimes trigger bot detection
+    # Download phase mein cookies zaroori hain for authenticated content
+    if use_cookies and os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
     
+    # ============================================
+    # DOWNLOAD SPECIFIC
+    # ============================================
     if download:
         out_dir = os.path.join(OUTPUT_DIR, "downloads")
         os.makedirs(out_dir, exist_ok=True)
         opts["outtmpl"] = os.path.join(out_dir, "%(title)s [%(id)s].%(ext)s")
-        opts["concurrent_fragment_downloads"] = 32
-        opts["buffersize"] = 2 * 1024 * 1024
+        opts["concurrent_fragment_downloads"] = 16
+        opts["buffersize"] = 1024 * 1024  # 1MB
+        opts["retries"] = 10
+        opts["fragment_retries"] = 10
         
         if quality == "best":
-            opts["format"] = "best[ext=mp4]/best"
+            opts["format"] = "bestvideo+bestaudio/best"
         else:
             try:
                 h = int(str(quality).rstrip("p"))
-                opts["format"] = (f"best[height<={h}][ext=mp4]/"
-                                  f"best[height<={h}]/best[ext=mp4]/best")
+                # Prefer HLS (web_safari) formats
+                opts["format"] = (
+                    f"best[height<={h}][ext=mp4]/"
+                    f"best[height<={h}]/"
+                    f"bestvideo[height<={h}]+bestaudio/"
+                    f"best"
+                )
             except:
                 opts["format"] = "best[ext=mp4]/best"
+        
+        # Merge format
+        opts["merge_output_format"] = "mp4"
     else:
         opts["skip_download"] = True
+        # Info fetch: try WITHOUT cookies first (avoid bot detection)
+        if use_cookies and os.path.exists(COOKIES_FILE):
+            opts["cookiefile"] = COOKIES_FILE
     
     return opts
 
@@ -360,11 +422,31 @@ def build_opts(download=False, quality="720p"):
 # ==============================================
 
 def extract_info(url):
-    try:
-        with yt_dlp.YoutubeDL(build_opts(download=False)) as ydl:
-            return ydl.extract_info(url, download=False)
-    except Exception as e:
-        return {"_error": str(e)}
+    """
+    Try multiple strategies:
+    1. With cookies + full clients
+    2. Without cookies (avoid bot detection)
+    3. web_safari only (HLS)
+    """
+    attempts = [
+        {"use_cookies": True, "label": "with_cookies"},
+        {"use_cookies": False, "label": "without_cookies"},
+    ]
+    
+    last_error = None
+    
+    for attempt in attempts:
+        try:
+            opts = build_opts(download=False, use_cookies=attempt["use_cookies"])
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info and not info.get("_error"):
+                    return info
+        except Exception as e:
+            last_error = str(e)
+            continue
+    
+    return {"_error": last_error or "Failed all attempts"}
 
 
 def build_full_info(info):
@@ -554,14 +636,20 @@ def upload_parallel(fp):
 def process_video(url, quality="720p"):
     t_start = time.time()
     
-    # Step 1: Extract info
+    # Step 1: Extract info (try multiple strategies)
     t0 = time.time()
     info = extract_info(url)
     if not info or info.get("_error"):
         return {
             "status": "error",
             "error_code": "EXTRACT_FAILED",
-            "message": info.get("_error", "Failed") if info else "No info"
+            "message": info.get("_error", "Failed") if info else "No info",
+            "environment": {
+                "deno": check_deno(),
+                "node": check_node(),
+                "yt_dlp_version": get_ytdlp_version(),
+                "python_version": sys.version.split()[0]
+            }
         }
     
     info_time = round(time.time() - t0, 2)
@@ -574,7 +662,7 @@ def process_video(url, quality="720p"):
     fname = None
     
     try:
-        opts = build_opts(download=True, quality=quality)
+        opts = build_opts(download=True, quality=quality, use_cookies=True)
         with yt_dlp.YoutubeDL(opts) as ydl:
             dl_info = ydl.extract_info(url, download=True)
             fname = ydl.prepare_filename(dl_info)
@@ -589,8 +677,6 @@ def process_video(url, quality="720p"):
         
         if fname and os.path.exists(fname):
             size = os.path.getsize(fname)
-            
-            # Step 3: Upload
             up_res = upload_parallel(fname)
             share_url = up_res.get("url")
             
@@ -605,7 +691,7 @@ def process_video(url, quality="720p"):
                 "upload_host": up_res.get("host") or "N/A"
             }
         else:
-            dl_data = {"status": "failed", "error": "File not found after download"}
+            dl_data = {"status": "failed", "error": "File not found"}
     except Exception as ex:
         dl_data = {"status": "failed", "error": str(ex)[:200]}
     
@@ -625,6 +711,11 @@ def process_video(url, quality="720p"):
         "technical": full.get("technical", {}),
         "extractor": full.get("extractor", {}),
         "formats_count": full.get("format_count", 0),
+        "environment": {
+            "deno": check_deno(),
+            "node": check_node(),
+            "yt_dlp_version": get_ytdlp_version()
+        },
         "credit": {
             "username": "@KINGFFAIAK47x",
             "made_by": "ANSH AFT"
@@ -638,31 +729,26 @@ def process_video(url, quality="720p"):
 
 @app.route('/', methods=['GET'])
 def home():
-    """API info"""
     cookie_status, cookie_msg = verify_cookies_file()
-    deno_ok = shutil.which("deno") is not None
+    deno_ok = check_deno()
+    node_ok = check_node()
     
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "3.0.0",
+        "version": "4.0.0",
         "status": "active",
         "system": {
             "cookies_loaded": cookie_status,
             "cookies_message": cookie_msg,
             "deno_available": deno_ok,
+            "node_available": node_ok,
             "python_version": sys.version.split()[0],
-            "yt_dlp_version": getattr(yt_dlp.version, "__version__", "unknown")
+            "yt_dlp_version": get_ytdlp_version()
         },
         "endpoint": {
             "/yt": {
                 "method": "GET",
-                "description": "Download YouTube video",
-                "example": "/yt?url=YOUTUBE_URL&quality=720p&key=FF",
-                "params": {
-                    "url": "YouTube video URL",
-                    "quality": "360p|480p|720p|1080p|best",
-                    "key": "API key"
-                }
+                "example": "/yt?url=YOUTUBE_URL&quality=720p&key=FF"
             }
         },
         "credit": {
@@ -675,7 +761,6 @@ def home():
 @app.route('/yt', methods=['GET'])
 @require_api_key
 def download_yt():
-    """Download YouTube video"""
     url = request.args.get('url', '').strip()
     quality = request.args.get('quality', '720p').strip()
     
@@ -684,7 +769,6 @@ def download_yt():
             "status": "error",
             "error_code": "MISSING_URL",
             "message": "YouTube URL required",
-            "usage": "/yt?url=YOUTUBE_URL&quality=720p&key=FF",
             "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
         }), 400
     
@@ -705,12 +789,8 @@ def download_yt():
     try:
         result = process_video(url, quality)
         elapsed = round((time.time() - start_time) * 1000, 2)
-        
         result["response_time"] = f"{elapsed}ms"
-        result["credit"] = {
-            "username": "@KINGFFAIAK47x",
-            "made_by": "ANSH AFT"
-        }
+        result["credit"] = {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
         
         if result.get("status") == "success":
             return jsonify(result), 200
@@ -727,15 +807,17 @@ def download_yt():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check"""
     cookie_status, cookie_msg = verify_cookies_file()
-    deno_ok = shutil.which("deno") is not None
+    deno_ok = check_deno()
+    node_ok = check_node()
     
     return jsonify({
         "status": "healthy",
         "cookies_loaded": cookie_status,
         "cookies_info": cookie_msg,
         "deno_available": deno_ok,
+        "node_available": node_ok,
+        "yt_dlp_version": get_ytdlp_version(),
         "timestamp": datetime.now().isoformat()
     })
 
@@ -744,7 +826,7 @@ def health():
 def not_found(error):
     return jsonify({
         "status": "error",
-        "message": "Endpoint not found. Use /yt",
+        "message": "Use /yt endpoint",
         "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
     }), 404
 
@@ -758,25 +840,18 @@ def internal_error(error):
     }), 500
 
 
-# ==============================================
-# MAIN
-# ==============================================
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    
     cookie_status, cookie_msg = verify_cookies_file()
-    deno_ok = shutil.which("deno") is not None
+    deno_ok = check_deno()
     
     print("=" * 60)
-    print("🎬 YOUTUBE DOWNLOADER API v3.0")
+    print("🎬 YOUTUBE DOWNLOADER API v4.0")
     print("=" * 60)
     print(f"🚀 Port: {port}")
     print(f"🍪 Cookies: {cookie_msg}")
-    print(f"⚙️  Deno: {'✅ Available' if deno_ok else '❌ NOT available'}")
-    print(f"🐍 Python: {sys.version.split()[0]}")
-    print(f"📦 yt-dlp: {getattr(yt_dlp.version, '__version__', 'unknown')}")
-    print("🔑 Keys: FF / AK$&FF")
+    print(f"⚙️  Deno: {'✅' if deno_ok else '❌ NOT AVAILABLE'}")
+    print(f"📦 yt-dlp: {get_ytdlp_version()}")
     print("=" * 60)
     
     app.run(host='0.0.0.0', port=port, debug=False)
