@@ -1,4 +1,7 @@
-# app.py - YouTube Downloader API (100% Working)
+# app.py - YouTube Downloader API v3.0
+# Made by @KINGFFAIAK47x · ANSH AFT
+# Render deployment ready
+
 from flask import Flask, jsonify, request
 import os
 import sys
@@ -7,18 +10,25 @@ import time
 import subprocess
 import threading
 import re
+import shutil
 from datetime import datetime
 from functools import wraps
 
-# Install yt-dlp if missing
+# ==============================================
+# INSTALL DEPENDENCIES IF MISSING
+# ==============================================
+
 def install_package(p):
     try:
         __import__(p.replace("-", "_"))
         return True
     except ImportError:
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", p],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", p],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
             return True
         except:
             return False
@@ -32,24 +42,21 @@ import requests
 app = Flask(__name__)
 
 # ==============================================
-# 🎬 YOUTUBE DOWNLOADER API
-# Made by @KINGFFAIAK47x · ANSH AFT
+# CONFIG
 # ==============================================
 
-# API KEYS
 VALID_KEYS = {
     "AK$&FF": "full_access",
     "FF": "full_access"
 }
 
-# ==============================================
-# CONFIG
-# ==============================================
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join("/tmp", "youtube_data")
+OUTPUT_DIR = "/tmp/youtube_data"
 COOKIES_FILE = os.path.join(SCRIPT_DIR, "yt_cookies.txt")
 DATA_FILE = os.path.join(OUTPUT_DIR, "youtube_data.json")
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 
 # ==============================================
 # AUTHENTICATION
@@ -82,6 +89,44 @@ def require_api_key(f):
 
 
 # ==============================================
+# COOKIES VERIFICATION
+# ==============================================
+
+def verify_cookies_file():
+    """Cookie file verify karo - 7 columns check"""
+    if not os.path.exists(COOKIES_FILE):
+        return False, "Cookie file not found"
+    
+    try:
+        with open(COOKIES_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        if "Netscape HTTP Cookie File" not in content:
+            return False, "Invalid cookie format (header missing)"
+        
+        valid_count = 0
+        invalid_count = 0
+        
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            
+            parts = line.split("\t")
+            if len(parts) == 7:
+                valid_count += 1
+            else:
+                invalid_count += 1
+        
+        if valid_count < 5:
+            return False, f"Too few valid cookies: {valid_count} (need 5+)"
+        
+        return True, f"{valid_count} valid cookies, {invalid_count} invalid"
+    except Exception as e:
+        return False, str(e)
+
+
+# ==============================================
 # HELPERS
 # ==============================================
 
@@ -99,15 +144,6 @@ def safe_int(o, d=0):
             return int(float(o))
         except:
             return d
-
-
-def safe_len(o):
-    if o is None:
-        return 0
-    try:
-        return len(o)
-    except:
-        return 0
 
 
 def fmt_size(s):
@@ -202,38 +238,6 @@ def validate_quality(quality):
 
 
 # ==============================================
-# COOKIES - PROPERLY FORMATTED
-# ==============================================
-
-def verify_cookies_file():
-    """Cookie file verify karo"""
-    if not os.path.exists(COOKIES_FILE):
-        return False, "Cookie file not found"
-    
-    try:
-        with open(COOKIES_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        if "Netscape HTTP Cookie File" not in content:
-            return False, "Invalid cookie format"
-        
-        # Count valid cookies
-        valid_count = 0
-        for line in content.split("\n"):
-            if line.strip() and not line.startswith("#"):
-                parts = line.split("\t")
-                if len(parts) == 7:
-                    valid_count += 1
-        
-        if valid_count < 5:
-            return False, f"Too few valid cookies: {valid_count}"
-        
-        return True, f"{valid_count} valid cookies"
-    except Exception as e:
-        return False, str(e)
-
-
-# ==============================================
 # JSON DB
 # ==============================================
 
@@ -289,7 +293,7 @@ def append_db(vdata):
 
 
 # ==============================================
-# YT-DLP OPTS - FULL POWER
+# YT-DLP OPTS - FIXED
 # ==============================================
 
 def build_opts(download=False, quality="720p"):
@@ -307,17 +311,23 @@ def build_opts(download=False, quality="720p"):
         "skip_unavailable_fragments": True,
         "noprogress": True,
         "consoletitle": False,
-        # ⚡ Multiple clients for reliability
+        
+        # ⚡ WORKING CLIENTS (android/ios blocked)
         "extractor_args": {
             "youtube": {
-                "player_client": ["web", "mweb", "ios", "android", "tv_embedded"]
+                "player_client": ["web", "mweb", "tv"]
             }
         },
+        
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         },
     }
+    
+    # Deno available? toh use karo
+    if shutil.which("deno"):
+        opts["js_runtimes"] = ["deno"]
     
     # Cookies add karo
     if os.path.exists(COOKIES_FILE):
@@ -339,8 +349,6 @@ def build_opts(download=False, quality="720p"):
                                   f"best[height<={h}]/best[ext=mp4]/best")
             except:
                 opts["format"] = "best[ext=mp4]/best"
-        
-        opts.pop("merge_output_format", None)
     else:
         opts["skip_download"] = True
     
@@ -370,7 +378,7 @@ def build_full_info(info):
     lc = safe_int(info.get("like_count"))
     cc = safe_int(info.get("comment_count"))
     
-    result = {
+    return {
         "video": {
             "id": vid,
             "title": safe_str(info.get("title")),
@@ -383,8 +391,7 @@ def build_full_info(info):
             "description_preview": desc[:1000],
             "thumbnail": safe_str(info.get("thumbnail")),
             "thumbnail_hd": f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg",
-            "thumbnail_sd": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-            "thumbnails": info.get("thumbnails") or []
+            "thumbnail_sd": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
         },
         "duration": {
             "seconds": dur,
@@ -397,7 +404,6 @@ def build_full_info(info):
             "upload_date": safe_str(info.get("upload_date")),
             "upload_date_formatted": fmt_date(info.get("upload_date")),
             "release_date": safe_str(info.get("release_date")),
-            "modified_date": safe_str(info.get("modified_date")),
             "timestamp": safe_int(info.get("timestamp"))
         },
         "engagement": {
@@ -415,80 +421,35 @@ def build_full_info(info):
             "url": safe_str(info.get("channel_url")),
             "uploader": safe_str(info.get("uploader")),
             "uploader_id": safe_str(info.get("uploader_id")),
-            "uploader_url": safe_str(info.get("uploader_url")),
             "follower_count": safe_int(info.get("channel_follower_count")),
             "follower_count_formatted": fmt_num(info.get("channel_follower_count"))
         },
         "metadata": {
             "categories": info.get("categories") or [],
             "tags": info.get("tags") or [],
-            "tags_count": safe_len(info.get("tags")),
+            "tags_count": len(info.get("tags") or []),
             "language": safe_str(info.get("language")),
             "age_limit": safe_int(info.get("age_limit")),
-            "is_family_friendly": info.get("is_family_friendly"),
             "availability": safe_str(info.get("availability"))
-        },
-        "subtitles": {
-            "manual": list((info.get("subtitles") or {}).keys()),
-            "automatic": list((info.get("automatic_captions") or {}).keys()),
-            "total_manual": safe_len(info.get("subtitles")),
-            "total_auto": safe_len(info.get("automatic_captions"))
-        },
-        "live": {
-            "is_live": info.get("is_live"),
-            "was_live": info.get("was_live"),
-            "live_status": safe_str(info.get("live_status"))
         },
         "technical": {
             "ext": safe_str(info.get("ext")),
             "format": safe_str(info.get("format")),
             "format_id": safe_str(info.get("format_id")),
-            "format_note": safe_str(info.get("format_note")),
             "width": safe_int(info.get("width")),
             "height": safe_int(info.get("height")),
             "fps": safe_int(info.get("fps")),
             "vcodec": safe_str(info.get("vcodec")),
             "acodec": safe_str(info.get("acodec")),
             "filesize": safe_int(info.get("filesize")),
-            "filesize_formatted": fmt_size(info.get("filesize")),
-            "audio_channels": safe_int(info.get("audio_channels")),
-            "audio_bitrate": safe_int(info.get("audio_bitrate")),
-            "video_bitrate": safe_int(info.get("video_bitrate"))
+            "filesize_formatted": fmt_size(info.get("filesize"))
         },
         "extractor": {
             "name": safe_str(info.get("extractor")),
-            "key": safe_str(info.get("extractor_key")),
-            "domain": safe_str(info.get("webpage_url_domain"))
+            "key": safe_str(info.get("extractor_key"))
         },
-        "chapters": info.get("chapters") or [],
-        "chapters_count": safe_len(info.get("chapters")),
-        "heatmap": info.get("heatmap"),
-        "formats": [],
-        "format_count": safe_len(info.get("formats"))
+        "format_count": len(info.get("formats") or [])
     }
-    
-    for f in (info.get("formats") or []):
-        if not f:
-            continue
-        fs = f.get("filesize") or f.get("filesize_approx")
-        result["formats"].append({
-            "format_id": safe_str(f.get("format_id")),
-            "ext": safe_str(f.get("ext")),
-            "resolution": safe_str(f.get("resolution")),
-            "width": safe_int(f.get("width")),
-            "height": safe_int(f.get("height")),
-            "fps": safe_int(f.get("fps")),
-            "vcodec": safe_str(f.get("vcodec")),
-            "acodec": safe_str(f.get("acodec")),
-            "filesize": safe_int(fs),
-            "filesize_formatted": fmt_size(fs),
-            "format_note": safe_str(f.get("format_note")),
-            "quality": safe_str(f.get("quality")),
-            "has_video": f.get("vcodec") != "none",
-            "has_audio": f.get("acodec") != "none"
-        })
-    
-    return result
 
 
 # ==============================================
@@ -587,12 +548,13 @@ def upload_parallel(fp):
 
 
 # ==============================================
-# PROCESS
+# PROCESS VIDEO
 # ==============================================
 
 def process_video(url, quality="720p"):
     t_start = time.time()
     
+    # Step 1: Extract info
     t0 = time.time()
     info = extract_info(url)
     if not info or info.get("_error"):
@@ -605,6 +567,7 @@ def process_video(url, quality="720p"):
     info_time = round(time.time() - t0, 2)
     full = build_full_info(info)
     
+    # Step 2: Download
     t0 = time.time()
     dl_data = {"status": "failed"}
     share_url = None
@@ -624,8 +587,10 @@ def process_video(url, quality="720p"):
         
         dl_time = round(time.time() - t0, 2)
         
-        if os.path.exists(fname):
+        if fname and os.path.exists(fname):
             size = os.path.getsize(fname)
+            
+            # Step 3: Upload
             up_res = upload_parallel(fname)
             share_url = up_res.get("url")
             
@@ -639,20 +604,11 @@ def process_video(url, quality="720p"):
                 "share_url": share_url or "UPLOAD_FAILED",
                 "upload_host": up_res.get("host") or "N/A"
             }
+        else:
+            dl_data = {"status": "failed", "error": "File not found after download"}
     except Exception as ex:
         dl_data = {"status": "failed", "error": str(ex)[:200]}
     
-    combined = {
-        "processed_at": datetime.now().isoformat(),
-        "source_url": url,
-        "video": full.get("video", {}),
-        "duration": full.get("duration", {}),
-        "engagement": full.get("engagement", {}),
-        "channel": full.get("channel", {}),
-        "download": dl_data
-    }
-    
-    append_db(combined)
     total_time = round(time.time() - t_start, 2)
     
     return {
@@ -666,12 +622,8 @@ def process_video(url, quality="720p"):
         "engagement": full.get("engagement", {}),
         "channel": full.get("channel", {}),
         "metadata": full.get("metadata", {}),
-        "subtitles": full.get("subtitles", {}),
-        "live": full.get("live", {}),
         "technical": full.get("technical", {}),
         "extractor": full.get("extractor", {}),
-        "chapters": full.get("chapters", []),
-        "chapters_count": full.get("chapters_count", 0),
         "formats_count": full.get("format_count", 0),
         "credit": {
             "username": "@KINGFFAIAK47x",
@@ -686,19 +638,31 @@ def process_video(url, quality="720p"):
 
 @app.route('/', methods=['GET'])
 def home():
+    """API info"""
     cookie_status, cookie_msg = verify_cookies_file()
+    deno_ok = shutil.which("deno") is not None
+    
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "status": "active",
-        "cookies": {
-            "loaded": cookie_status,
-            "message": cookie_msg
+        "system": {
+            "cookies_loaded": cookie_status,
+            "cookies_message": cookie_msg,
+            "deno_available": deno_ok,
+            "python_version": sys.version.split()[0],
+            "yt_dlp_version": getattr(yt_dlp.version, "__version__", "unknown")
         },
         "endpoint": {
             "/yt": {
                 "method": "GET",
-                "example": "/yt?url=YOUTUBE_URL&quality=720p&key=your_api_key"
+                "description": "Download YouTube video",
+                "example": "/yt?url=YOUTUBE_URL&quality=720p&key=FF",
+                "params": {
+                    "url": "YouTube video URL",
+                    "quality": "360p|480p|720p|1080p|best",
+                    "key": "API key"
+                }
             }
         },
         "credit": {
@@ -711,6 +675,7 @@ def home():
 @app.route('/yt', methods=['GET'])
 @require_api_key
 def download_yt():
+    """Download YouTube video"""
     url = request.args.get('url', '').strip()
     quality = request.args.get('quality', '720p').strip()
     
@@ -719,6 +684,7 @@ def download_yt():
             "status": "error",
             "error_code": "MISSING_URL",
             "message": "YouTube URL required",
+            "usage": "/yt?url=YOUTUBE_URL&quality=720p&key=FF",
             "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
         }), 400
     
@@ -739,8 +705,12 @@ def download_yt():
     try:
         result = process_video(url, quality)
         elapsed = round((time.time() - start_time) * 1000, 2)
+        
         result["response_time"] = f"{elapsed}ms"
-        result["credit"] = {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+        result["credit"] = {
+            "username": "@KINGFFAIAK47x",
+            "made_by": "ANSH AFT"
+        }
         
         if result.get("status") == "success":
             return jsonify(result), 200
@@ -757,35 +727,56 @@ def download_yt():
 
 @app.route('/health', methods=['GET'])
 def health():
+    """Health check"""
     cookie_status, cookie_msg = verify_cookies_file()
+    deno_ok = shutil.which("deno") is not None
+    
     return jsonify({
         "status": "healthy",
         "cookies_loaded": cookie_status,
         "cookies_info": cookie_msg,
+        "deno_available": deno_ok,
         "timestamp": datetime.now().isoformat()
     })
 
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({"status": "error", "message": "Use /yt",
-                    "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}}), 404
+    return jsonify({
+        "status": "error",
+        "message": "Endpoint not found. Use /yt",
+        "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+    }), 404
 
 
 @app.errorhandler(500)
 def internal_error(error):
-    return jsonify({"status": "error", "message": "Internal server error",
-                    "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}}), 500
+    return jsonify({
+        "status": "error",
+        "message": "Internal server error",
+        "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+    }), 500
 
+
+# ==============================================
+# MAIN
+# ==============================================
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    
     cookie_status, cookie_msg = verify_cookies_file()
+    deno_ok = shutil.which("deno") is not None
+    
     print("=" * 60)
-    print("🎬 YOUTUBE DOWNLOADER API v2.0")
+    print("🎬 YOUTUBE DOWNLOADER API v3.0")
     print("=" * 60)
     print(f"🚀 Port: {port}")
     print(f"🍪 Cookies: {cookie_msg}")
-    print("🔑 Key: AK$&FF")
+    print(f"⚙️  Deno: {'✅ Available' if deno_ok else '❌ NOT available'}")
+    print(f"🐍 Python: {sys.version.split()[0]}")
+    print(f"📦 yt-dlp: {getattr(yt_dlp.version, '__version__', 'unknown')}")
+    print("🔑 Keys: FF / AK$&FF")
     print("=" * 60)
+    
     app.run(host='0.0.0.0', port=port, debug=False)
