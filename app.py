@@ -1,8 +1,7 @@
-# app.py - YouTube Downloader API v20.0 FINAL FIXED
+# app.py - YouTube Downloader API v21.0 ULTRA-STABLE
 # Made by @KINGFFAIAK47x · ANSH AFT
-# EXACT FLAT RESPONSE + FAST + ALL DATA
+# 502 FIXED + FULL ERROR DETECTION + EXACT FLAT RESPONSE
 
-# ⚠️ FIRST import os - PHIR environment variables
 import os
 import sys
 import json
@@ -11,11 +10,14 @@ import threading
 import re
 import shutil
 import hashlib
+import traceback
 from datetime import datetime
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Environment variables AFTER imports
+# ==============================================
+# ENV VARS (after imports)
+# ==============================================
 os.environ["YTDLP_NO_PLUGIN_LOAD"] = "1"
 os.environ["YT_DLP_NO_PLUGINS"] = "1"
 os.environ["PYTHONWARNINGS"] = "ignore"
@@ -26,13 +28,33 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
 # ==============================================
-# CONFIG
+# GLOBAL ERROR LOG (for debugging)
+# ==============================================
+_STARTUP_LOG = []
+_STARTUP_TIME = datetime.now().isoformat()
+
+
+def log_event(msg, level="INFO"):
+    entry = f"[{datetime.now().isoformat()}] [{level}] {msg}"
+    _STARTUP_LOG.append(entry)
+    print(entry, flush=True)
+    if len(_STARTUP_LOG) > 200:
+        _STARTUP_LOG.pop(0)
+
+
+# ==============================================
+# CONFIG (with try/except - NEVER crash at import)
 # ==============================================
 
-VALID_KEYS = {
-    "AK$&FF": "full_access",
-    "FF": "full_access"
-}
+try:
+    VALID_KEYS = {
+        "AK$&FF": "full_access",
+        "FF": "full_access"
+    }
+    log_event("Config loaded")
+except Exception as e:
+    log_event(f"CONFIG ERROR: {e}", "ERROR")
+    VALID_KEYS = {"FF": "full_access"}
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = "/tmp/youtube_data"
@@ -40,13 +62,14 @@ OUTPUT_DIR = "/tmp/youtube_data"
 COOKIES_SRC = os.path.join(SCRIPT_DIR, "yt_cookies.txt")
 COOKIES_FILE = "/tmp/yt_cookies.txt"
 
-if os.path.exists(COOKIES_SRC):
-    try:
+try:
+    if os.path.exists(COOKIES_SRC):
         shutil.copy2(COOKIES_SRC, COOKIES_FILE)
-    except Exception:
-        pass
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+        log_event("Cookies copied")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    log_event("Output dir ready")
+except Exception as e:
+    log_event(f"FS ERROR: {e}", "ERROR")
 
 # ==============================================
 # PROXY
@@ -60,10 +83,16 @@ PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
 USE_PROXY = True
 
 # ==============================================
-# THREADS / CACHE
+# THREADS / CACHE (safe limits)
 # ==============================================
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="yt_")
+try:
+    _EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="yt_")
+    log_event("ThreadPool ready")
+except Exception as e:
+    log_event(f"THREADPOOL ERROR: {e}", "ERROR")
+    _EXECUTOR = None
+
 _INFO_CACHE = {}
 _CACHE_LOCK = threading.Lock()
 CACHE_TTL = 300
@@ -71,7 +100,8 @@ CACHE_TTL = 300
 _POT_CACHE = {"checked": 0, "available": False}
 _POT_LOCK = threading.Lock()
 
-MAX_TOTAL_TIME = 85
+MAX_TOTAL_TIME = 80
+GUNICORN_TIMEOUT = 120
 
 # ==============================================
 # LAZY LOADERS
@@ -357,10 +387,10 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
         out_dir = os.path.join(OUTPUT_DIR, "downloads")
         os.makedirs(out_dir, exist_ok=True)
         opts["outtmpl"] = os.path.join(out_dir, "%(title).100B [%(id)s].%(ext)s")
-        opts["concurrent_fragment_downloads"] = 32
+        opts["concurrent_fragment_downloads"] = 16
         opts["merge_output_format"] = "mp4"
-        opts["buffersize"] = 1024 * 1024 * 8
-        opts["http_chunk_size"] = 1024 * 1024 * 8
+        opts["buffersize"] = 1024 * 1024 * 4
+        opts["http_chunk_size"] = 1024 * 1024 * 4
         opts["skip_download"] = False
         opts["retries"] = 2
         opts["fragment_retries"] = 2
@@ -423,7 +453,7 @@ def cache_get(url):
 def cache_set(url, info):
     with _CACHE_LOCK:
         _INFO_CACHE[url] = (time.time(), info)
-        if len(_INFO_CACHE) > 50:
+        if len(_INFO_CACHE) > 30:
             now = time.time()
             keys = [k for k, (ts, _) in _INFO_CACHE.items() if now - ts > CACHE_TTL]
             for k in keys:
@@ -475,24 +505,33 @@ def extract_info(url):
     all_errors = []
     winner = None
     
-    futures = {_EXECUTOR.submit(_extract_attempt, url, a): a for a in attempts}
-    
-    try:
-        for fut in as_completed(futures, timeout=20):
-            try:
-                info, err = fut.result(timeout=1)
-                if info and not winner:
-                    winner = info
-                    for f in futures:
-                        if not f.done():
-                            f.cancel()
-                    break
-                elif err:
-                    all_errors.append(err)
-            except Exception as e:
-                all_errors.append(str(e)[:100])
-    except Exception as e:
-        all_errors.append(f"Parallel timeout: {e}")
+    if _EXECUTOR is None:
+        # Fallback: sequential
+        for a in attempts:
+            info, err = _extract_attempt(url, a)
+            if info:
+                winner = info
+                break
+            elif err:
+                all_errors.append(err)
+    else:
+        try:
+            futures = {_EXECUTOR.submit(_extract_attempt, url, a): a for a in attempts}
+            for fut in as_completed(futures, timeout=20):
+                try:
+                    info, err = fut.result(timeout=1)
+                    if info and not winner:
+                        winner = info
+                        for f in futures:
+                            if not f.done():
+                                f.cancel()
+                        break
+                    elif err:
+                        all_errors.append(err)
+                except Exception as e:
+                    all_errors.append(str(e)[:100])
+        except Exception as e:
+            all_errors.append(f"Parallel timeout: {e}")
     
     if winner:
         winner["_verified"] = True
@@ -508,7 +547,7 @@ def extract_info(url):
 
 
 # ==============================================
-# BUILD FULL INFO - EXACT FLAT STRUCTURE
+# BUILD FULL INFO
 # ==============================================
 
 def build_full_info(info):
@@ -519,7 +558,6 @@ def build_full_info(info):
     dur = safe_int(info.get("duration"))
     desc = safe_str(info.get("description"))
     
-    # ===== VIDEO =====
     thumbnails = []
     for t in (info.get("thumbnails") or []):
         if not t:
@@ -553,7 +591,6 @@ def build_full_info(info):
         "thumbnails": thumbnails,
     }
     
-    # ===== DURATION =====
     duration = {
         "seconds": dur,
         "string": safe_str(info.get("duration_string")),
@@ -562,7 +599,6 @@ def build_full_info(info):
         "hours": dur // 3600 if dur else 0,
     }
     
-    # ===== DATES =====
     upload_date = safe_str(info.get("upload_date"))
     dates = {
         "upload_date": upload_date,
@@ -572,7 +608,6 @@ def build_full_info(info):
         "timestamp": safe_int(info.get("timestamp")),
     }
     
-    # ===== ENGAGEMENT =====
     vc = safe_int(info.get("view_count"))
     lc = safe_int(info.get("like_count"))
     cc = safe_int(info.get("comment_count"))
@@ -586,7 +621,6 @@ def build_full_info(info):
         "average_rating": info.get("average_rating"),
     }
     
-    # ===== CHANNEL =====
     channel = {
         "name": safe_str(info.get("channel")),
         "id": safe_str(info.get("channel_id")),
@@ -598,7 +632,6 @@ def build_full_info(info):
         "follower_count_formatted": fmt_num(info.get("channel_follower_count")) if info.get("channel_follower_count") else "N/A",
     }
     
-    # ===== METADATA =====
     metadata = {
         "categories": info.get("categories") or [],
         "tags": info.get("tags") or [],
@@ -609,7 +642,6 @@ def build_full_info(info):
         "availability": safe_str(info.get("availability")),
     }
     
-    # ===== SUBTITLES =====
     subtitles_manual = list((info.get("subtitles") or {}).keys())
     subtitles_auto = list((info.get("automatic_captions") or {}).keys())
     subtitles = {
@@ -619,14 +651,12 @@ def build_full_info(info):
         "total_auto": len(subtitles_auto),
     }
     
-    # ===== LIVE =====
     live = {
         "is_live": safe_bool(info.get("is_live")),
         "was_live": safe_bool(info.get("was_live")),
         "live_status": safe_str(info.get("live_status")),
     }
     
-    # ===== TECHNICAL =====
     technical = {
         "ext": safe_str(info.get("ext")),
         "format": safe_str(info.get("format")),
@@ -644,14 +674,12 @@ def build_full_info(info):
         "video_bitrate": safe_float(info.get("video_bitrate")),
     }
     
-    # ===== EXTRACTOR =====
     extractor = {
         "name": safe_str(info.get("extractor")),
         "key": safe_str(info.get("extractor_key")),
         "domain": safe_str(info.get("webpage_url_domain")),
     }
     
-    # ===== CHAPTERS =====
     chapters = []
     for c in (info.get("chapters") or []):
         if not c:
@@ -662,7 +690,6 @@ def build_full_info(info):
             "title": safe_str(c.get("title")),
         })
     
-    # ===== FORMATS =====
     formats = []
     for f in (info.get("formats") or []):
         if not f:
@@ -755,18 +782,6 @@ def up_litterbox(fp):
     return None
 
 
-def up_0x0(fp):
-    r_ = get_requests()
-    try:
-        with open(fp, "rb") as f:
-            r = r_.post("https://0x0.st", files={"file": f}, timeout=60)
-        if r.status_code == 200 and r.text.strip().startswith("http"):
-            return ("0x0.st", r.text.strip())
-    except Exception:
-        pass
-    return None
-
-
 def upload_parallel(fp):
     res = {"url": None, "host": None}
     lock = threading.Lock()
@@ -786,13 +801,13 @@ def upload_parallel(fp):
         except Exception:
             pass
     
-    hosts = [up_tmpfiles, up_catbox, up_litterbox, up_0x0]
+    hosts = [up_tmpfiles, up_catbox, up_litterbox]
     threads = [threading.Thread(target=worker, args=(f,), daemon=True) for f in hosts]
     for t in threads:
         t.start()
     
     start = time.time()
-    while time.time() - start < 60:
+    while time.time() - start < 45:
         if res["url"]:
             break
         if all(not t.is_alive() for t in threads):
@@ -803,11 +818,24 @@ def upload_parallel(fp):
 
 
 # ==============================================
-# PROCESS VIDEO - EXACT FLAT STRUCTURE
+# PROCESS VIDEO - WITH FULL ERROR DETECTION
 # ==============================================
 
 def process_video(url, quality="720p"):
-    yt = get_yt_dlp()
+    errors = []
+    yt = None
+    
+    try:
+        yt = get_yt_dlp()
+    except Exception as e:
+        return {
+            "status": "error",
+            "error_code": "YTDLP_IMPORT_ERROR",
+            "message": f"yt-dlp import failed: {str(e)[:200]}",
+            "traceback": traceback.format_exc()[:500],
+            "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+        }
+    
     if not yt:
         return {
             "status": "error",
@@ -855,6 +883,7 @@ def process_video(url, quality="720p"):
                         "file_size_formatted": fmt_size(size),
                         "quality": quality,
                         "download_time": f"{round(t_dl_end - t_dl_start, 2)}s",
+                        "upload_time": f"{round(t_up_end - t_up_start, 2)}s",
                         "downloaded_at": datetime.now().isoformat(),
                         "share_url": up_res.get("url") or "UPLOAD_FAILED",
                         "upload_host": up_res.get("host") or "N/A",
@@ -864,6 +893,7 @@ def process_video(url, quality="720p"):
                     dl_result = {
                         "status": "failed",
                         "error": "File not found after download",
+                        "error_code": "FILE_NOT_FOUND",
                         "quality": quality,
                     }
         except Exception as ex:
@@ -871,6 +901,7 @@ def process_video(url, quality="720p"):
                 dl_result = {
                     "status": "failed",
                     "error": str(ex)[:200],
+                    "error_code": type(ex).__name__,
                     "quality": quality,
                 }
     
@@ -882,7 +913,11 @@ def process_video(url, quality="720p"):
                 info_result["info"] = info
         except Exception as e:
             with info_lock:
-                info_result["info"] = {"_error": str(e)[:200], "_verified": False}
+                info_result["info"] = {
+                    "_error": str(e)[:200],
+                    "_verified": False,
+                    "_traceback": traceback.format_exc()[:500]
+                }
     
     t_dl = threading.Thread(target=do_download, daemon=True)
     t_info = threading.Thread(target=do_info, daemon=True)
@@ -890,25 +925,40 @@ def process_video(url, quality="720p"):
     t_dl.start()
     t_info.start()
     
-    t_dl.join(timeout=MAX_TOTAL_TIME - 20)
-    t_info.join(timeout=20)
+    t_dl.join(timeout=MAX_TOTAL_TIME - 15)
+    t_info.join(timeout=15)
+    
+    dl_alive = t_dl.is_alive()
+    info_alive = t_info.is_alive()
     
     info = info_result.get("info")
     
     if not info or info.get("_error"):
+        total_time = round(time.time() - t_start, 2)
         return {
-            "status": "error",
-            "error_code": "EXTRACT_FAILED",
-            "message": (info.get("_error", "Failed") if info else "No info"),
-            "all_errors": (info.get("_all_errors", []) if info else []),
+            "status": "partial" if dl_result.get("status") == "success" else "error",
+            "total_time": f"{total_time}s",
             "download": dl_result,
+            "error_code": "EXTRACT_FAILED",
+            "message": (info.get("_error", "Failed") if info else "No info returned"),
+            "all_errors": (info.get("_all_errors", []) if info else []),
+            "info_thread_alive": info_alive,
+            "download_thread_alive": dl_alive,
+            "debug_info": {
+                "deno": check_deno(),
+                "node": check_node(),
+                "ffmpeg": check_ffmpeg(),
+                "pot_server": check_pot_server(),
+                "cookies_exists": os.path.exists(COOKIES_FILE),
+                "proxy_enabled": USE_PROXY,
+            },
             "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
         }
     
     full = build_full_info(info)
     total_time = round(time.time() - t_start, 2)
     
-    # ⚡⚡⚡ EXACT FLAT STRUCTURE ⚡⚡⚡
+    # ⚡ EXACT FLAT STRUCTURE
     return {
         "status": "success",
         "total_time": f"{total_time}s",
@@ -938,10 +988,12 @@ def process_video(url, quality="720p"):
 
 @app.route('/', methods=['GET', 'HEAD'])
 def home():
+    """INSTANT - no blocking checks"""
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "20.0.0",
+        "version": "21.0.0",
         "description": "Download YouTube videos and get complete info in one request",
+        "started_at": _STARTUP_TIME,
         "endpoints": {
             "/yt": {
                 "method": "GET",
@@ -951,7 +1003,15 @@ def home():
             },
             "/health": {
                 "method": "GET",
-                "description": "Health check"
+                "description": "Health check with full system status"
+            },
+            "/debug": {
+                "method": "GET",
+                "description": "Full debug info (env, logs, threads)"
+            },
+            "/ping": {
+                "method": "GET",
+                "description": "Simple ping - instant"
             }
         },
         "credit": {
@@ -961,44 +1021,106 @@ def home():
     }), 200
 
 
+@app.route('/ping', methods=['GET', 'HEAD'])
+def ping():
+    """SUPER FAST - for Render healthcheck"""
+    return "pong", 200
+
+
 @app.route('/health', methods=['GET', 'HEAD'])
 def health():
+    """FAST - basic checks with safe timeouts"""
     return jsonify({
         "status": "healthy",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "started_at": _STARTUP_TIME,
+        "checks": {
+            "deno": check_deno(),
+            "node": check_node(),
+            "ffmpeg": check_ffmpeg(),
+            "pot_server": check_pot_server(),
+            "cookies_file": os.path.exists(COOKIES_FILE),
+            "output_dir": os.path.exists(OUTPUT_DIR),
+            "threadpool": _EXECUTOR is not None,
+        },
+    }), 200
+
+
+@app.route('/debug', methods=['GET', 'HEAD'])
+def debug():
+    """FULL DEBUG INFO - helps find 502 cause"""
+    cookie_status = os.path.exists(COOKIES_FILE)
+    cookie_size = os.path.getsize(COOKIES_FILE) if cookie_status else 0
+    
+    return jsonify({
+        "status": "ok",
+        "version": "21.0.0",
+        "started_at": _STARTUP_TIME,
+        "now": datetime.now().isoformat(),
+        "python": sys.version,
+        "platform": sys.platform,
+        "pid": os.getpid(),
+        "env": {
+            "PORT": os.environ.get("PORT"),
+            "WEB_CONCURRENCY": os.environ.get("WEB_CONCURRENCY"),
+        },
+        "system": {
+            "deno": check_deno(),
+            "node": check_node(),
+            "ffmpeg": check_ffmpeg(),
+            "pot_server": check_pot_server(),
+            "cookies_exists": cookie_status,
+            "cookies_size": cookie_size,
+            "cookies_path": COOKIES_FILE,
+            "output_dir": os.path.exists(OUTPUT_DIR),
+            "threadpool": _EXECUTOR is not None,
+        },
+        "cache": {
+            "entries": len(_INFO_CACHE),
+            "ttl": CACHE_TTL,
+        },
+        "threads": {
+            "active": threading.active_count(),
+            "names": [t.name for t in threading.enumerate()],
+        },
+        "logs": _STARTUP_LOG[-50:],
+        "credit": {
+            "username": "@KINGFFAIAK47x",
+            "made_by": "ANSH AFT"
+        }
     }), 200
 
 
 @app.route('/yt', methods=['GET'])
 @require_api_key
 def download_yt():
-    url = request.args.get('url', '').strip()
-    quality = request.args.get('quality', '720p').strip()
-    
-    if not url:
-        return jsonify({
-            "status": "error",
-            "error_code": "MISSING_URL",
-            "message": "YouTube URL required",
-            "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
-        }), 400
-    
-    is_valid, result = validate_youtube_url(url)
-    if not is_valid:
-        return jsonify({
-            "status": "error",
-            "error_code": "INVALID_URL",
-            "message": result,
-            "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
-        }), 400
-    
-    url = result
-    quality = validate_quality(quality)
-    
     try:
+        url = request.args.get('url', '').strip()
+        quality = request.args.get('quality', '720p').strip()
+        
+        if not url:
+            return jsonify({
+                "status": "error",
+                "error_code": "MISSING_URL",
+                "message": "YouTube URL required",
+                "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+            }), 400
+        
+        is_valid, result = validate_youtube_url(url)
+        if not is_valid:
+            return jsonify({
+                "status": "error",
+                "error_code": "INVALID_URL",
+                "message": result,
+                "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+            }), 400
+        
+        url = result
+        quality = validate_quality(quality)
+        
         result = process_video(url, quality)
         result["credit"] = {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
-        if result.get("status") == "success":
+        if result.get("status") in ("success", "partial"):
             return jsonify(result), 200
         else:
             return jsonify(result), 400
@@ -1006,19 +1128,43 @@ def download_yt():
         return jsonify({
             "status": "error",
             "error_code": "PROCESS_ERROR",
-            "message": str(e)[:200],
+            "message": str(e)[:300],
+            "traceback": traceback.format_exc()[:800],
             "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
         }), 500
 
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({"status": "error", "message": "Use /yt"}), 404
+    return jsonify({"status": "error", "message": "Use /yt or /health or /debug"}), 404
 
 
 @app.errorhandler(500)
 def internal_error(error):
-    return jsonify({"status": "error", "message": "Internal error"}), 500
+    return jsonify({"status": "error", "message": "Internal error", "error": str(error)[:200]}), 500
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Catch ALL exceptions - never return 502"""
+    return jsonify({
+        "status": "error",
+        "error_code": "UNHANDLED_EXCEPTION",
+        "message": str(e)[:300],
+        "traceback": traceback.format_exc()[:800],
+        "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
+    }), 500
+
+
+# Startup log
+log_event("=" * 60)
+log_event("YouTube Downloader API v21.0 STARTED")
+log_event(f"Python: {sys.version.split()[0]}")
+log_event(f"Deno: {check_deno()}")
+log_event(f"Node: {check_node()}")
+log_event(f"FFmpeg: {check_ffmpeg()}")
+log_event(f"ThreadPool: {_EXECUTOR is not None}")
+log_event("=" * 60)
 
 
 if __name__ == '__main__':
