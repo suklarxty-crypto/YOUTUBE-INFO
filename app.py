@@ -1,6 +1,6 @@
-# app.py - YouTube Downloader API v4.0
+# app.py - YouTube Downloader API v4.1
 # Made by @KINGFFAIAK47x · ANSH AFT
-# Deep research + PO Token + Deno + Multi-client
+# FIXED: js_runtimes dict format + Node.js fallback
 
 from flask import Flask, jsonify, request
 import os
@@ -63,22 +63,18 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ==============================================
 
 def check_deno():
-    """Deno installed hai ya nahi"""
     return shutil.which("deno") is not None
 
 
 def check_node():
-    """Node.js installed hai ya nahi"""
     return shutil.which("node") is not None
 
 
 def get_ytdlp_version():
-    """yt-dlp version"""
     return getattr(yt_dlp.version, "__version__", "unknown")
 
 
 def verify_cookies_file():
-    """Cookie file verify karo"""
     if not os.path.exists(COOKIES_FILE):
         return False, "Cookie file not found"
     
@@ -300,12 +296,13 @@ def append_db(vdata):
 
 
 # ==============================================
-# YT-DLP OPTS - DEEP TUNED
+# YT-DLP OPTS - FIXED js_runtimes FORMAT
 # ==============================================
 
 def build_opts(download=False, quality="720p", use_cookies=True):
     """
-    Deep tuned options based on YouTube 2026 requirements
+    yt-dlp 2026.08.19 compatible options
+    FIXED: js_runtimes is DICT not LIST
     """
     deno_ok = check_deno()
     node_ok = check_node()
@@ -327,29 +324,20 @@ def build_opts(download=False, quality="720p", use_cookies=True):
         "skip_unavailable_fragments": True,
         "noprogress": True,
         "consoletitle": False,
-        "ignoreerrors": False,
         "no_cache_dir": True,
         
         # ============================================
-        # ⚡ YOUTUBE PLAYER CLIENTS (2026 OPTIMAL)
+        # ⚡ YOUTUBE PLAYER CLIENTS
         # ============================================
-        # web_safari → HLS formats (PO Token not needed for GVS)
-        # web → SABR formats (PO Token needed)
-        # mweb → PO Token needed for GVS
-        # tv → DRM'd if no cookies
-        # android_vr → fallback, no PO Token
         "extractor_args": {
             "youtube": {
                 "player_client": [
-                    "web_safari",   # HLS - no PO token
-                    "web",          # Standard
-                    "mweb",         # Mobile web
-                    "tv_embedded",  # TV
-                    "android_vr",   # Fallback
+                    "web_safari",
+                    "web",
+                    "mweb",
+                    "tv_embedded",
+                    "android_vr",
                 ],
-                "player_skip": ["webpage", "configs"],  # Faster
-                "formats": ["missing_pot"],  # Only formats needing PO token
-                "fetch_pot": ["auto"],  # Auto fetch PO token
             }
         },
         
@@ -363,19 +351,18 @@ def build_opts(download=False, quality="720p", use_cookies=True):
     }
     
     # ============================================
-    # JS RUNTIME (CRITICAL FOR EJS CHALLENGES)
+    # JS RUNTIME - FIXED: DICT FORMAT!
     # ============================================
+    # yt-dlp 2026+ expects: {"runtime_name": {config}}
     if deno_ok:
-        opts["js_runtimes"] = ["deno"]
+        opts["js_runtimes"] = {"deno": {}}
     elif node_ok:
-        opts["js_runtimes"] = ["node"]
-    # else: EJS challenges fail honge, but try anyway
+        opts["js_runtimes"] = {"node": {}}
+    # Agar koi bhi nahi hai toh skip — EJS challenges fail honge, but try
     
     # ============================================
-    # COOKIES (CONDITIONAL)
+    # COOKIES
     # ============================================
-    # Info fetch phase mein cookies sometimes trigger bot detection
-    # Download phase mein cookies zaroori hain for authenticated content
     if use_cookies and os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
     
@@ -387,7 +374,7 @@ def build_opts(download=False, quality="720p", use_cookies=True):
         os.makedirs(out_dir, exist_ok=True)
         opts["outtmpl"] = os.path.join(out_dir, "%(title)s [%(id)s].%(ext)s")
         opts["concurrent_fragment_downloads"] = 16
-        opts["buffersize"] = 1024 * 1024  # 1MB
+        opts["buffersize"] = 1024 * 1024
         opts["retries"] = 10
         opts["fragment_retries"] = 10
         
@@ -396,7 +383,6 @@ def build_opts(download=False, quality="720p", use_cookies=True):
         else:
             try:
                 h = int(str(quality).rstrip("p"))
-                # Prefer HLS (web_safari) formats
                 opts["format"] = (
                     f"best[height<={h}][ext=mp4]/"
                     f"best[height<={h}]/"
@@ -406,13 +392,9 @@ def build_opts(download=False, quality="720p", use_cookies=True):
             except:
                 opts["format"] = "best[ext=mp4]/best"
         
-        # Merge format
         opts["merge_output_format"] = "mp4"
     else:
         opts["skip_download"] = True
-        # Info fetch: try WITHOUT cookies first (avoid bot detection)
-        if use_cookies and os.path.exists(COOKIES_FILE):
-            opts["cookiefile"] = COOKIES_FILE
     
     return opts
 
@@ -422,12 +404,7 @@ def build_opts(download=False, quality="720p", use_cookies=True):
 # ==============================================
 
 def extract_info(url):
-    """
-    Try multiple strategies:
-    1. With cookies + full clients
-    2. Without cookies (avoid bot detection)
-    3. web_safari only (HLS)
-    """
+    """Try with cookies first, then without"""
     attempts = [
         {"use_cookies": True, "label": "with_cookies"},
         {"use_cookies": False, "label": "without_cookies"},
@@ -636,7 +613,6 @@ def upload_parallel(fp):
 def process_video(url, quality="720p"):
     t_start = time.time()
     
-    # Step 1: Extract info (try multiple strategies)
     t0 = time.time()
     info = extract_info(url)
     if not info or info.get("_error"):
@@ -655,7 +631,6 @@ def process_video(url, quality="720p"):
     info_time = round(time.time() - t0, 2)
     full = build_full_info(info)
     
-    # Step 2: Download
     t0 = time.time()
     dl_data = {"status": "failed"}
     share_url = None
@@ -735,7 +710,7 @@ def home():
     
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "4.0.0",
+        "version": "4.1.0",
         "status": "active",
         "system": {
             "cookies_loaded": cookie_status,
@@ -844,13 +819,15 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     cookie_status, cookie_msg = verify_cookies_file()
     deno_ok = check_deno()
+    node_ok = check_node()
     
     print("=" * 60)
-    print("🎬 YOUTUBE DOWNLOADER API v4.0")
+    print("🎬 YOUTUBE DOWNLOADER API v4.1")
     print("=" * 60)
     print(f"🚀 Port: {port}")
     print(f"🍪 Cookies: {cookie_msg}")
-    print(f"⚙️  Deno: {'✅' if deno_ok else '❌ NOT AVAILABLE'}")
+    print(f"⚙️  Deno: {'✅' if deno_ok else '❌'}")
+    print(f"📦 Node: {'✅' if node_ok else '❌'}")
     print(f"📦 yt-dlp: {get_ytdlp_version()}")
     print("=" * 60)
     
