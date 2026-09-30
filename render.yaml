@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: youtube-info
+    runtime: docker
+    branch: main
+    plan: free
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: API_KEYS
+        sync: false
+      - key: YTDLP_PROXY
+        sync: false
+      - key: YT_COOKIE_FILE
+        value: /etc/secrets/yt_cookies.txt
+      - key: RATE_LIMIT_PER_MIN
+        value: "3"
+      - key: DOWNLOAD_CONCURRENCY
+        value: "1"
+      - key: MAX_VIDEO_SECONDS
+        value: "7200"
+      - key: LOG_LEVEL
+        value: INFO
