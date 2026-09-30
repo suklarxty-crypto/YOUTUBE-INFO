@@ -1,12 +1,8 @@
-# app.py - YouTube Downloader API v19.0 FINAL
+# app.py - YouTube Downloader API v20.0 FINAL FIXED
 # Made by @KINGFFAIAK47x · ANSH AFT
 # EXACT FLAT RESPONSE + FAST + ALL DATA
 
-os.environ["YTDLP_NO_PLUGIN_LOAD"] = "1"
-os.environ["YT_DLP_NO_PLUGINS"] = "1"
-os.environ["PYTHONWARNINGS"] = "ignore"
-
-from flask import Flask, jsonify, request
+# ⚠️ FIRST import os - PHIR environment variables
 import os
 import sys
 import json
@@ -18,6 +14,13 @@ import hashlib
 from datetime import datetime
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Environment variables AFTER imports
+os.environ["YTDLP_NO_PLUGIN_LOAD"] = "1"
+os.environ["YT_DLP_NO_PLUGINS"] = "1"
+os.environ["PYTHONWARNINGS"] = "ignore"
+
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
@@ -937,7 +940,7 @@ def process_video(url, quality="720p"):
 def home():
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "19.0.0",
+        "version": "20.0.0",
         "description": "Download YouTube videos and get complete info in one request",
         "endpoints": {
             "/yt": {
