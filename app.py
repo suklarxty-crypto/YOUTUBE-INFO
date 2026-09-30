@@ -1,6 +1,5 @@
-# app.py - YouTube Downloader API v11.0
+# app.py - YouTube Downloader API v11.1
 # Made by @KINGFFAIAK47x · ANSH AFT
-# FIXED: yt-dlp[default] + POT + Deno + Proxy + Docker
 
 from flask import Flask, jsonify, request
 import os
@@ -28,21 +27,21 @@ VALID_KEYS = {
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = "/tmp/youtube_data"
 
-# ⚡ FIX: Cookies /tmp/ mein copy (read-only FS se bachne ke liye)
+# Cookies to /tmp
 COOKIES_SRC = os.path.join(SCRIPT_DIR, "yt_cookies.txt")
 COOKIES_FILE = "/tmp/yt_cookies.txt"
 
 if os.path.exists(COOKIES_SRC):
     try:
         shutil.copy2(COOKIES_SRC, COOKIES_FILE)
-        print(f"✅ Cookies copied to {COOKIES_FILE}")
+        print(f"✅ Cookies copied")
     except Exception as e:
-        print(f"❌ Cookie copy error: {e}")
+        print(f"❌ Cookie error: {e}")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ==============================================
-# ⚡ WEBSHARE RESIDENTIAL PROXY
+# WEBSHARE PROXY
 # ==============================================
 
 PROXY_HOST = "p.webshare.io"
@@ -94,7 +93,6 @@ def check_ffmpeg():
 
 
 def check_pot_server():
-    """POT provider check (port 4416)"""
     try:
         r = get_requests().get("http://127.0.0.1:4416/ping", timeout=3)
         return r.status_code == 200
@@ -245,11 +243,10 @@ def validate_quality(q):
 
 
 # ==============================================
-# YT-DLP OPTS - v11.0 FIXED
+# YT-DLP OPTS - v11.1
 # ==============================================
 
 def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False):
-    """Build yt-dlp opts with ALL fixes"""
     if quality == "best":
         format_str = "bv*+ba/b"
     else:
@@ -278,7 +275,6 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         },
-        # ⚡ FIX: player_client web,mweb,android (cookies support + rate limit bypass)
         "extractor_args": {
             "youtube": {
                 "player_client": ["web", "mweb", "android"],
@@ -287,11 +283,15 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
         },
     }
     
-    # ⚡ JS RUNTIME (Deno preferred, Node fallback)
+    # ⚡ JS RUNTIME — Deno preferred, Node fallback
+    js_runtimes = {}
     if check_deno():
-        opts["js_runtimes"] = {"deno": {}}
-    elif check_node():
-        opts["js_runtimes"] = {"node": {}}
+        js_runtimes["deno"] = {}
+    if check_node():
+        js_runtimes["node"] = {}
+    
+    if js_runtimes:
+        opts["js_runtimes"] = js_runtimes
     
     # ⚡ POT SERVER
     if check_pot_server():
@@ -328,7 +328,6 @@ def extract_info(url):
     if not yt:
         return {"_error": "yt-dlp not available"}
     
-    # ⚡ Try multiple strategies
     attempts = [
         {"use_cookies": True, "no_proxy": False, "label": "cookies+proxy"},
         {"use_cookies": False, "no_proxy": False, "label": "proxy_only"},
@@ -566,7 +565,7 @@ def home():
     cookie_status, cookie_msg = verify_cookies_file()
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "11.0.0",
+        "version": "11.1.0",
         "status": "active",
         "system": {
             "cookies_loaded": cookie_status,
@@ -659,11 +658,10 @@ def internal_error(error):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print("=" * 60)
-    print("🎬 YOUTUBE DOWNLOADER API v11.0")
+    print("🎬 YOUTUBE DOWNLOADER API v11.1")
     print("=" * 60)
     print(f"🚀 Port: {port}")
     print(f"🍪 Cookies: {verify_cookies_file()[1]}")
-    print(f"📁 Cookies path: {COOKIES_FILE}")
     print(f"⚙️  Deno: {check_deno()}")
     print(f"📦 Node: {check_node()}")
     print(f"🎥 ffmpeg: {check_ffmpeg()}")
