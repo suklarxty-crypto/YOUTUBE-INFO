@@ -1,4 +1,6 @@
 flask==3.0.0
-yt-dlp==2024.11.18
+yt-dlp>=2025.11.12
 requests==2.31.0
 gunicorn==21.2.0
+bgutil-ytdlp-pot-provider>=2.0.0
+yt-dlp-ejs>=0.3.2
