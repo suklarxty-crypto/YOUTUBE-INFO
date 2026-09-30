@@ -1,6 +1,6 @@
-# app.py - YouTube Downloader API v10.0
+# app.py - YouTube Downloader API v11.0
 # Made by @KINGFFAIAK47x · ANSH AFT
-# FIXED: Read-only FS + POT server + Docker mode
+# FIXED: yt-dlp[default] + POT + Deno + Proxy + Docker
 
 from flask import Flask, jsonify, request
 import os
@@ -28,15 +28,16 @@ VALID_KEYS = {
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = "/tmp/youtube_data"
 
-# ⚡ COOKIES: /tmp (writable) mein copy karo
+# ⚡ FIX: Cookies /tmp/ mein copy (read-only FS se bachne ke liye)
 COOKIES_SRC = os.path.join(SCRIPT_DIR, "yt_cookies.txt")
 COOKIES_FILE = "/tmp/yt_cookies.txt"
 
 if os.path.exists(COOKIES_SRC):
     try:
         shutil.copy2(COOKIES_SRC, COOKIES_FILE)
+        print(f"✅ Cookies copied to {COOKIES_FILE}")
     except Exception as e:
-        print(f"Cookie copy error: {e}")
+        print(f"❌ Cookie copy error: {e}")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -77,7 +78,7 @@ def get_requests():
 
 
 # ==============================================
-# HELPERS
+# ENVIRONMENT CHECK
 # ==============================================
 
 def check_deno():
@@ -93,7 +94,7 @@ def check_ffmpeg():
 
 
 def check_pot_server():
-    """Check if POT provider running"""
+    """POT provider check (port 4416)"""
     try:
         r = get_requests().get("http://127.0.0.1:4416/ping", timeout=3)
         return r.status_code == 200
@@ -111,7 +112,7 @@ def get_ytdlp_version():
 
 def verify_cookies_file():
     if not os.path.exists(COOKIES_FILE):
-        return False, "Cookie file not found"
+        return False, "Not found"
     try:
         with open(COOKIES_FILE, "r", encoding="utf-8") as f:
             content = f.read()
@@ -123,11 +124,9 @@ def verify_cookies_file():
             if line and not line.startswith("#"):
                 if len(line.split("\t")) == 7:
                     valid += 1
-        if valid < 5:
-            return False, f"Too few: {valid}"
         return True, f"{valid} valid"
-    except Exception as e:
-        return False, str(e)
+    except:
+        return False, "Error"
 
 
 def safe_str(o, d=""):
@@ -246,10 +245,11 @@ def validate_quality(q):
 
 
 # ==============================================
-# YT-DLP OPTS
+# YT-DLP OPTS - v11.0 FIXED
 # ==============================================
 
 def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False):
+    """Build yt-dlp opts with ALL fixes"""
     if quality == "best":
         format_str = "bv*+ba/b"
     else:
@@ -278,24 +278,32 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         },
+        # ⚡ FIX: player_client web,mweb,android (cookies support + rate limit bypass)
         "extractor_args": {
             "youtube": {
-                "player_client": ["web", "mweb", "tv"],
+                "player_client": ["web", "mweb", "android"],
                 "fetch_pot": ["auto"],
             },
-            "youtubepot-bgutilhttp": {
-                "base_url": "http://127.0.0.1:4416",
-            },
-        },
-        "js_runtimes": {
-            "deno": {},
-            "node": {},
         },
     }
     
+    # ⚡ JS RUNTIME (Deno preferred, Node fallback)
+    if check_deno():
+        opts["js_runtimes"] = {"deno": {}}
+    elif check_node():
+        opts["js_runtimes"] = {"node": {}}
+    
+    # ⚡ POT SERVER
+    if check_pot_server():
+        opts["extractor_args"]["youtubepot-bgutilhttp"] = {
+            "base_url": "http://127.0.0.1:4416"
+        }
+    
+    # ⚡ PROXY
     if USE_PROXY and not no_proxy:
         opts["proxy"] = PROXY_URL
     
+    # ⚡ COOKIES
     if use_cookies and os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
     
@@ -304,7 +312,6 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
         os.makedirs(out_dir, exist_ok=True)
         opts["outtmpl"] = os.path.join(out_dir, "%(title).100B [%(id)s].%(ext)s")
         opts["concurrent_fragment_downloads"] = 16
-        opts["buffersize"] = 1024 * 1024
         opts["merge_output_format"] = "mp4"
     else:
         opts["skip_download"] = True
@@ -312,15 +319,20 @@ def build_opts(download=False, quality="720p", use_cookies=True, no_proxy=False)
     return opts
 
 
+# ==============================================
+# EXTRACT
+# ==============================================
+
 def extract_info(url):
     yt = get_yt_dlp()
     if not yt:
         return {"_error": "yt-dlp not available"}
     
+    # ⚡ Try multiple strategies
     attempts = [
         {"use_cookies": True, "no_proxy": False, "label": "cookies+proxy"},
-        {"use_cookies": True, "no_proxy": True, "label": "cookies_only"},
         {"use_cookies": False, "no_proxy": False, "label": "proxy_only"},
+        {"use_cookies": True, "no_proxy": True, "label": "cookies_only"},
     ]
     
     last_error = None
@@ -355,23 +367,6 @@ def build_full_info(info):
     desc = safe_str(info.get("description"))
     vc = safe_int(info.get("view_count"))
     lc = safe_int(info.get("like_count"))
-    cc = safe_int(info.get("comment_count"))
-    
-    formats = []
-    for f in (info.get("formats") or [])[:10]:
-        if not f:
-            continue
-        fs = f.get("filesize") or f.get("filesize_approx")
-        formats.append({
-            "format_id": safe_str(f.get("format_id")),
-            "ext": safe_str(f.get("ext")),
-            "resolution": safe_str(f.get("resolution")),
-            "height": safe_int(f.get("height")),
-            "filesize": safe_int(fs),
-            "filesize_formatted": fmt_size(fs),
-            "vcodec": safe_str(f.get("vcodec")),
-            "acodec": safe_str(f.get("acodec")),
-        })
     
     return {
         "video": {
@@ -391,48 +386,23 @@ def build_full_info(info):
             "view_count_formatted": fmt_num(vc),
             "like_count": lc,
             "like_count_formatted": fmt_num(lc),
-            "comment_count": cc,
         },
         "channel": {
             "name": safe_str(info.get("channel")),
             "id": safe_str(info.get("channel_id")),
-            "follower_count": safe_int(info.get("channel_follower_count")),
-        },
-        "metadata": {
-            "tags": info.get("tags") or [],
-            "language": safe_str(info.get("language")),
-            "age_limit": safe_int(info.get("age_limit")),
         },
         "technical": {
             "width": safe_int(info.get("width")),
             "height": safe_int(info.get("height")),
-            "fps": safe_int(info.get("fps")),
-            "vcodec": safe_str(info.get("vcodec")),
-            "acodec": safe_str(info.get("acodec")),
             "filesize": safe_int(info.get("filesize")),
             "filesize_formatted": fmt_size(info.get("filesize")),
         },
-        "formats": formats,
-        "format_count": len(info.get("formats") or []),
     }
 
 
 # ==============================================
 # UPLOAD
 # ==============================================
-
-def up_0x0(fp):
-    r_ = get_requests()
-    try:
-        with open(fp, "rb") as f:
-            r = r_.post("https://0x0.st", files={"file": f},
-                        headers={"User-Agent": "Mozilla/5.0"}, timeout=60)
-        if r.status_code == 200 and r.text.strip().startswith("http"):
-            return ("0x0.st", r.text.strip())
-    except:
-        pass
-    return None
-
 
 def up_catbox(fp):
     r_ = get_requests()
@@ -482,7 +452,7 @@ def upload_parallel(fp):
             pass
     
     threads = [threading.Thread(target=worker, args=(f,), daemon=True)
-               for f in [up_0x0, up_catbox, up_litterbox]]
+               for f in [up_catbox, up_litterbox]]
     for t in threads:
         t.start()
     
@@ -571,10 +541,7 @@ def process_video(url, quality="720p"):
         "duration": full.get("duration", {}),
         "engagement": full.get("engagement", {}),
         "channel": full.get("channel", {}),
-        "metadata": full.get("metadata", {}),
         "technical": full.get("technical", {}),
-        "formats": full.get("formats", []),
-        "format_count": full.get("format_count", 0),
         "environment": {
             "deno": check_deno(),
             "node": check_node(),
@@ -599,7 +566,7 @@ def home():
     cookie_status, cookie_msg = verify_cookies_file()
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "10.0.0",
+        "version": "11.0.0",
         "status": "active",
         "system": {
             "cookies_loaded": cookie_status,
@@ -692,7 +659,7 @@ def internal_error(error):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print("=" * 60)
-    print("🎬 YOUTUBE DOWNLOADER API v10.0")
+    print("🎬 YOUTUBE DOWNLOADER API v11.0")
     print("=" * 60)
     print(f"🚀 Port: {port}")
     print(f"🍪 Cookies: {verify_cookies_file()[1]}")
