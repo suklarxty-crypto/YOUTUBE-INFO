@@ -964,31 +964,28 @@ def process_video(url, quality="720p", video_id=None):
     finally:
         _DL_SEMAPHORE.release()
 
-
 # ==============================================
-# ROUTES
+# 🚀 ROUTES
 # ==============================================
 
-@app.route('/', methods=['GET', 'HEAD'])
+@app.route('/', methods=['GET'])
 def home():
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "26.0.0",
-        "status": "ok",
+        "qualities": ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "best"],
         "endpoints": {
             "/yt": {
                 "method": "GET",
                 "description": "Download YouTube video + full info",
-                "example": "/yt?url=https://youtu.be/VIDEO_ID&quality=720p&key=FF",
-                "qualities": ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "best"]
+                "example": "/yt?url=https://youtu.be/VIDEO_ID&quality=720p&key=FF"
             },
-            "/health": "Health check",
-            "/ready": "Readiness (yt-dlp, ffmpeg, POT, cookies)",
-            "/ping": "Simple ping",
-            "/debug": "Debug info"
+            "/health": "Health check"
         },
-        "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
-    }), 200
+        "credit": {
+            "username": "@KINGFFAIAK47x",
+            "made_by": "ANSH AFT"
+        }
+    })
 
 
 @app.route('/ping', methods=['GET', 'HEAD'])
