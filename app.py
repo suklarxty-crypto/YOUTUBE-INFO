@@ -1,6 +1,7 @@
-# app.py - YouTube Downloader API v26.0 (READ-ONLY FS FIX + FULL COOKIES + STICKY PROXY)
+# app.py - YouTube Downloader API v27.0 (MULTI-SOURCE UPLOAD + TIME TRACKING)
 # Made by @KINGFFAIAK47x · ANSH AFT
 # FIX: /etc/secrets read-only → copy to /tmp automatically
+# NEW: 6+ upload hosts, parallel fallback, per-host timing
 
 import os
 import sys
@@ -13,6 +14,7 @@ import hashlib
 import traceback
 import uuid
 import signal
+import concurrent.futures
 from datetime import datetime
 from functools import wraps
 from collections import defaultdict
@@ -32,6 +34,8 @@ RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "5"))
 DOWNLOAD_CONCURRENCY = int(os.environ.get("DOWNLOAD_CONCURRENCY", "1"))
 MAX_VIDEO_SECONDS = int(os.environ.get("MAX_VIDEO_SECONDS", "7200"))
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+UPLOAD_TIMEOUT = int(os.environ.get("UPLOAD_TIMEOUT", "120"))
+UPLOAD_PARALLEL = os.environ.get("UPLOAD_PARALLEL", "true").lower() == "true"
 
 OUTPUT_DIR = "/tmp/youtube_data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -59,45 +63,27 @@ def log_event(msg, level="INFO"):
 # ==============================================
 
 def resolve_cookie_file():
-    """
-    Priority:
-    1. Env var YT_COOKIE_FILE (if /etc/secrets → copy to /tmp)
-    2. /etc/secrets/yt_cookies.txt (Render secret) → copy to /tmp
-    3. /app/yt_cookies.txt (Docker COPY)
-    4. Local ./yt_cookies.txt
-    5. /tmp/yt_cookies.txt
-    ALWAYS return a WRITABLE path because yt-dlp may rewrite it.
-    """
     TMP_PATH = "/tmp/yt_cookies.txt"
     candidates = []
 
-    # 1. Env var
     if YT_COOKIE_ENV:
         candidates.append(YT_COOKIE_ENV)
 
-    # 2. Render secret file
     candidates.append("/etc/secrets/yt_cookies.txt")
-
-    # 3. Docker COPY location
     candidates.append("/app/yt_cookies.txt")
 
-    # 4. Local repo
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidates.append(os.path.join(script_dir, "yt_cookies.txt"))
-
-    # 5. Already in /tmp
     candidates.append(TMP_PATH)
 
     for path in candidates:
         if not path or not os.path.exists(path):
             continue
 
-        # If already writable (in /tmp), return directly
         if path == TMP_PATH:
             log_event(f"✅ Cookies found at {path} (writable)")
             return path
 
-        # Otherwise copy to /tmp (writable)
         try:
             shutil.copy2(path, TMP_PATH)
             os.chmod(TMP_PATH, 0o644)
@@ -544,7 +530,6 @@ def extract_info(url):
                 errors.append(f"[{a['label']}] Invalid response")
         except Exception as e:
             err_msg = str(e)[:180]
-            # Classify error for better reporting
             if "Sign in to confirm" in err_msg or "bot" in err_msg.lower():
                 errors.append(f"[{a['label']}] BOT_CHECK: {err_msg}")
             elif "Private video" in err_msg:
@@ -750,51 +735,272 @@ def build_full_info(info):
 
 
 # ==============================================
-# UPLOAD
+# 🚀 MULTI-SOURCE UPLOAD SYSTEM
 # ==============================================
 
 def up_tmpfiles(fp):
+    """tmpfiles.org - 1GB limit, 1 hour retention"""
     r_ = get_requests()
+    t0 = time.time()
     try:
         with open(fp, "rb") as f:
             r = r_.post("https://tmpfiles.org/api/v1/upload",
-                        files={"file": f}, timeout=90)
+                        files={"file": f}, timeout=UPLOAD_TIMEOUT)
         if r.status_code == 200:
             data = r.json()
             if data.get("status") == "success":
                 url = data.get("data", {}).get("url", "")
                 if url:
-                    return ("tmpfiles.org", url.replace("tmpfiles.org/", "tmpfiles.org/dl/"))
-    except Exception:
-        pass
-    return None
+                    return {
+                        "host": "tmpfiles.org",
+                        "url": url.replace("tmpfiles.org/", "tmpfiles.org/dl/"),
+                        "time": round(time.time() - t0, 2),
+                        "status": "success"
+                    }
+    except Exception as e:
+        return {"host": "tmpfiles.org", "status": "failed", "error": str(e)[:150], "time": round(time.time() - t0, 2)}
+    return {"host": "tmpfiles.org", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
 
 
 def up_catbox(fp):
+    """catbox.moe - 200MB limit, permanent"""
     r_ = get_requests()
+    t0 = time.time()
     try:
         with open(fp, "rb") as f:
             r = r_.post("https://catbox.moe/user/api.php",
                         data={"reqtype": "fileupload"},
-                        files={"fileToUpload": f}, timeout=90)
+                        files={"fileToUpload": f}, timeout=UPLOAD_TIMEOUT)
         if r.status_code == 200 and r.text.strip().startswith("http"):
-            return ("catbox.moe", r.text.strip())
-    except Exception:
-        pass
-    return None
+            return {
+                "host": "catbox.moe",
+                "url": r.text.strip(),
+                "time": round(time.time() - t0, 2),
+                "status": "success"
+            }
+    except Exception as e:
+        return {"host": "catbox.moe", "status": "failed", "error": str(e)[:150], "time": round(time.time() - t0, 2)}
+    return {"host": "catbox.moe", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
 
 
-def upload_sequential(fp):
-    for fn in [up_tmpfiles, up_catbox]:
+def up_0x0(fp):
+    """0x0.st - 512MB limit, 30 days retention"""
+    r_ = get_requests()
+    t0 = time.time()
+    try:
+        with open(fp, "rb") as f:
+            r = r_.post("https://0x0.st",
+                        files={"file": f},
+                        headers={"User-Agent": USER_AGENT},
+                        timeout=UPLOAD_TIMEOUT)
+        if r.status_code == 200 and r.text.strip().startswith("http"):
+            return {
+                "host": "0x0.st",
+                "url": r.text.strip(),
+                "time": round(time.time() - t0, 2),
+                "status": "success"
+            }
+    except Exception as e:
+        return {"host": "0x0.st", "status": "failed", "error": str(e)[:150], "time": round(time.time() - t0, 2)}
+    return {"host": "0x0.st", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
+
+
+def up_litterbox(fp):
+    """litterbox.catbox.moe - temporary (1h/12h/24h/72h)"""
+    r_ = get_requests()
+    t0 = time.time()
+    try:
+        with open(fp, "rb") as f:
+            r = r_.post("https://litterbox.catbox.moe/resources/internals/api.php",
+                        data={"reqtype": "fileupload", "time": "24h"},
+                        files={"fileToUpload": f}, timeout=UPLOAD_TIMEOUT)
+        if r.status_code == 200 and r.text.strip().startswith("http"):
+            return {
+                "host": "litterbox.catbox.moe",
+                "url": r.text.strip(),
+                "time": round(time.time() - t0, 2),
+                "status": "success"
+            }
+    except Exception as e:
+        return {"host": "litterbox.catbox.moe", "status": "failed", "error": str(e)[:150], "time": round(time.time() - t0, 2)}
+    return {"host": "litterbox.catbox.moe", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
+
+
+def up_uguu(fp):
+    """uguu.se - 128MB limit, 3 hours retention"""
+    r_ = get_requests()
+    t0 = time.time()
+    try:
+        with open(fp, "rb") as f:
+            r = r_.post("https://uguu.se/upload.php",
+                        files={"files[]": f}, timeout=UPLOAD_TIMEOUT)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("success") and data.get("files"):
+                url = data["files"][0].get("url", "")
+                if url:
+                    return {
+                        "host": "uguu.se",
+                        "url": url,
+                        "time": round(time.time() - t0, 2),
+                        "status": "success"
+                    }
+    except Exception as e:
+        return {"host": "uguu.se", "status": "failed", "error": str(e)[:150], "time": round(time.time() - t0, 2)}
+    return {"host": "uguu.se", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
+
+
+def up_fileio(fp):
+    """file.io - 2GB limit, one-time download"""
+    r_ = get_requests()
+    t0 = time.time()
+    try:
+        with open(fp, "rb") as f:
+            r = r_.post("https://file.io",
+                        files={"file": f}, timeout=UPLOAD_TIMEOUT)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("success") and data.get("link"):
+                return {
+                    "host": "file.io",
+                    "url": data["link"],
+                    "time": round(time.time() - t0, 2),
+                    "status": "success"
+                }
+    except Exception as e:
+        return {"host": "file.io", "status": "failed", "error": str(e)[:150], "time": round(time.time() - t0, 2)}
+    return {"host": "file.io", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
+
+
+# List of all upload functions
+UPLOAD_HOSTS = [
+    up_tmpfiles,
+    up_catbox,
+    up_0x0,
+    up_litterbox,
+    up_uguu,
+    up_fileio,
+]
+
+
+def upload_sequential(fp, existing_results=None):
+    """
+    Try upload hosts sequentially.
+    Returns: (best_result, all_attempts)
+    """
+    all_attempts = existing_results or []
+    best = None
+
+    for fn in UPLOAD_HOSTS:
         if _SHUTTING_DOWN.is_set():
             break
         try:
-            r = fn(fp)
-            if r:
-                return {"url": r[1], "host": r[0]}
-        except Exception:
+            res = fn(fp)
+            all_attempts.append(res)
+            log_event(f"📤 Upload {res.get('host')}: {res.get('status')} ({res.get('time', 0)}s)")
+            if res.get("status") == "success" and not best:
+                best = res
+                # Don't break — we want to try all for better host
+        except Exception as e:
+            all_attempts.append({
+                "host": fn.__name__,
+                "status": "failed",
+                "error": str(e)[:150],
+                "time": 0
+            })
             continue
-    return {"url": None, "host": None}
+
+    return best, all_attempts
+
+
+def upload_parallel(fp, max_workers=4):
+    """
+    Try multiple upload hosts in parallel.
+    Returns: (best_result, all_attempts)
+    """
+    all_attempts = []
+    best = None
+
+    def _try_upload(fn):
+        try:
+            res = fn(fp)
+            return res
+        except Exception as e:
+            return {
+                "host": fn.__name__,
+                "status": "failed",
+                "error": str(e)[:150],
+                "time": 0
+            }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_try_upload, fn): fn for fn in UPLOAD_HOSTS}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                res = future.result(timeout=UPLOAD_TIMEOUT + 10)
+                all_attempts.append(res)
+                log_event(f"📤 [PARALLEL] {res.get('host')}: {res.get('status')} ({res.get('time', 0)}s)")
+                if res.get("status") == "success" and not best:
+                    best = res
+            except Exception as e:
+                all_attempts.append({
+                    "host": futures[future].__name__,
+                    "status": "failed",
+                    "error": str(e)[:150],
+                    "time": 0
+                })
+
+    return best, all_attempts
+
+
+def upload_multi(fp):
+    """
+    Main upload function — tries parallel first, then sequential fallback.
+    Returns: dict with url, host, time, all_attempts
+    """
+    t_start = time.time()
+    all_attempts = []
+
+    # Check file size
+    try:
+        size = os.path.getsize(fp)
+        log_event(f"📁 File size: {fmt_size(size)}")
+    except Exception:
+        size = 0
+
+    # Try parallel first if enabled
+    if UPLOAD_PARALLEL:
+        best, attempts = upload_parallel(fp)
+        all_attempts.extend(attempts)
+    else:
+        best = None
+
+    # If parallel failed, try sequential
+    if not best:
+        log_event("🔄 Parallel upload failed, trying sequential...")
+        best, seq_attempts = upload_sequential(fp, all_attempts)
+        all_attempts = seq_attempts
+
+    total_time = round(time.time() - t_start, 2)
+
+    if best:
+        return {
+            "url": best.get("url"),
+            "host": best.get("host"),
+            "upload_time": best.get("time", total_time),
+            "total_upload_time": total_time,
+            "all_attempts": all_attempts,
+            "status": "success"
+        }
+    else:
+        return {
+            "url": None,
+            "host": None,
+            "upload_time": total_time,
+            "total_upload_time": total_time,
+            "all_attempts": all_attempts,
+            "status": "failed"
+        }
 
 
 # ==============================================
@@ -828,12 +1034,10 @@ def process_video(url, quality="720p", video_id=None):
         if not info or info.get("_error") or not info.get("_verified"):
             total_time = round(time.time() - t_start, 2)
 
-            # Build error response
             raw_errors = info.get("_all_errors", []) if info else []
             user_message = "Video extraction failed"
             error_code = "EXTRACTION_FAILED"
 
-            # Classify
             joined = " | ".join(raw_errors)
             if "BOT_CHECK" in joined or "Sign in to confirm" in joined:
                 error_code = "VIDEO_AUTH_OR_PRIVATE"
@@ -891,20 +1095,23 @@ def process_video(url, quality="720p", video_id=None):
             if fname and os.path.exists(fname):
                 size = os.path.getsize(fname)
                 t_up = time.time()
-                up_res = upload_sequential(fname)
+                up_res = upload_multi(fname)  # 🚀 Multi-source upload
                 t_up_end = time.time()
 
                 dl_result = {
-                    "status": "success",
+                    "status": up_res.get("status", "failed"),
                     "filename": os.path.basename(fname),
                     "file_size": size,
                     "file_size_formatted": fmt_size(size),
                     "quality": quality,
                     "download_time": f"{round(t_dl_end - t_dl, 2)}s",
                     "upload_time": f"{round(t_up_end - t_up, 2)}s",
+                    "upload_time_best_host": f"{up_res.get('upload_time', 0)}s",
                     "downloaded_at": datetime.now().isoformat(),
                     "share_url": up_res.get("url") or "UPLOAD_FAILED",
                     "upload_host": up_res.get("host") or "N/A",
+                    "upload_attempts": up_res.get("all_attempts", []),
+                    "total_upload_time": f"{up_res.get('total_upload_time', 0)}s",
                 }
             else:
                 dl_result = {
@@ -972,11 +1179,13 @@ def process_video(url, quality="720p", video_id=None):
 def home():
     return jsonify({
         "service": "🎬 YouTube Downloader API",
+        "version": "27.0.0",
+        "upload_hosts": [fn.__name__ for fn in UPLOAD_HOSTS],
         "qualities": ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "best"],
         "endpoints": {
             "/yt": {
                 "method": "GET",
-                "description": "Download YouTube video + full info",
+                "description": "Download YouTube video + full info + multi-source upload",
                 "example": "/yt?url=https://youtu.be/VIDEO_ID&quality=720p&key=FF"
             },
             "/health": "Health check"
@@ -1024,6 +1233,7 @@ def ready():
         "deno": check_deno(),
         "node": check_node(),
         "proxy": bool(YTDLP_PROXY),
+        "upload_hosts": [fn.__name__ for fn in UPLOAD_HOSTS],
         "timestamp": datetime.now().isoformat(),
     }), 200 if (yt_ok and ffmpeg_ok) else 503
 
@@ -1079,7 +1289,7 @@ def download_yt():
 def debug():
     return jsonify({
         "status": "ok",
-        "version": "26.0.0",
+        "version": "27.0.0",
         "started_at": _STARTUP_TIME,
         "now": datetime.now().isoformat(),
         "pid": os.getpid(),
@@ -1098,6 +1308,9 @@ def debug():
         "config": {
             "rate_limit_per_min": RATE_LIMIT_PER_MIN,
             "download_concurrency": DOWNLOAD_CONCURRENCY,
+            "upload_parallel": UPLOAD_PARALLEL,
+            "upload_timeout": UPLOAD_TIMEOUT,
+            "upload_hosts": [fn.__name__ for fn in UPLOAD_HOSTS],
         },
         "threads": {
             "active": threading.active_count(),
@@ -1130,11 +1343,13 @@ def he(e):
 # ==============================================
 
 log_event("=" * 60)
-log_event("YouTube Downloader API v26.0 STARTED")
+log_event("YouTube Downloader API v27.0 STARTED")
 log_event(f"Deno: {check_deno()}, Node: {check_node()}, FFmpeg: {check_ffmpeg()}")
 log_event(f"Cookies: {COOKIE_FILE}")
 log_event(f"Proxy: {'SET' if YTDLP_PROXY else 'NOT SET'}")
 log_event(f"POT: {check_pot_server()}")
+log_event(f"Upload Hosts: {len(UPLOAD_HOSTS)} available")
+log_event(f"Upload Parallel: {UPLOAD_PARALLEL}")
 log_event("=" * 60)
 
 
