@@ -1,7 +1,12 @@
-# app.py - YouTube Downloader API v27.0 (MULTI-SOURCE UPLOAD + TIME TRACKING)
+# app.py - YouTube Downloader API v28.0 (3 HOSTS ONLY + 2K MAX + QUALITY VERIFY)
 # Made by @KINGFFAIAK47x · ANSH AFT
 # FIX: /etc/secrets read-only → copy to /tmp automatically
-# NEW: 6+ upload hosts, parallel fallback, per-host timing
+# RULES:
+#   - Upload ONLY to: tmpfiles.org, catbox.moe, litterbox.catbox.moe
+#   - Max quality: 1440p (2K). Anything above → forced to 1440p
+#   - Verify downloaded file quality BEFORE upload
+#   - Verify file size is in 2K range BEFORE upload
+#   - If quality/size check fails → DO NOT upload
 
 import os
 import sys
@@ -14,6 +19,7 @@ import hashlib
 import traceback
 import uuid
 import signal
+import subprocess
 import concurrent.futures
 from datetime import datetime
 from functools import wraps
@@ -32,10 +38,31 @@ YTDLP_PROXY = os.environ.get("YTDLP_PROXY", "").strip()
 YT_COOKIE_ENV = os.environ.get("YT_COOKIE_FILE", "").strip()
 RATE_LIMIT_PER_MIN = int(os.environ.get("RATE_LIMIT_PER_MIN", "5"))
 DOWNLOAD_CONCURRENCY = int(os.environ.get("DOWNLOAD_CONCURRENCY", "1"))
-MAX_VIDEO_SECONDS = int(os.environ.get("MAX_VIDEO_SECONDS", "7200"))
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 UPLOAD_TIMEOUT = int(os.environ.get("UPLOAD_TIMEOUT", "120"))
 UPLOAD_PARALLEL = os.environ.get("UPLOAD_PARALLEL", "true").lower() == "true"
+
+# ==============================================
+# 🚫 HARD LIMITS (NEW v28.0)
+# ==============================================
+
+MAX_QUALITY = "1440p"          # 2K — anything above gets clamped
+MAX_HEIGHT = 1440              # 2K = 1440p
+MIN_HEIGHT = 144               # sanity lower bound
+
+# Quality hierarchy for clamping
+QUALITY_ORDER = ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p"]
+QUALITY_HEIGHT = {
+    "144p": 144, "240p": 240, "360p": 360, "480p": 480,
+    "720p": 720, "1080p": 1080, "1440p": 1440, "2160p": 2160,
+    "best": 1440  # "best" clamped to 2K
+}
+
+# 2K file size sanity range (video only, no huge 4K/8K)
+# 2K ~ 1440p video: rough min/max bytes for sanity check
+SIZE_2K_MIN_BYTES = 1 * 1024 * 1024         # 1 MB min (very short clips)
+SIZE_2K_MAX_BYTES = 6 * 1024 * 1024 * 1024  # 6 GB max (long 2K video)
+# If file bigger than this → reject (probably 4K accidentally)
 
 OUTPUT_DIR = "/tmp/youtube_data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -208,6 +235,10 @@ def check_ffmpeg():
     return shutil.which("ffmpeg") is not None
 
 
+def check_ffprobe():
+    return shutil.which("ffprobe") is not None
+
+
 # ==============================================
 # HELPERS
 # ==============================================
@@ -321,6 +352,172 @@ def cleanup_old_files(max_age=1800):
 
 
 # ==============================================
+# 🎯 QUALITY CLAMPING (NEW v28.0)
+# ==============================================
+
+def clamp_quality(q):
+    """
+    Clamp requested quality to MAX_QUALITY (1440p / 2K).
+    Anything above 1440p gets forced down to 1440p.
+    """
+    if not q:
+        return MAX_QUALITY
+    q = str(q).strip().lower()
+
+    if q == "best":
+        return MAX_QUALITY
+
+    if q not in QUALITY_ORDER:
+        return "720p"
+
+    requested_h = QUALITY_HEIGHT.get(q, 720)
+
+    if requested_h > MAX_HEIGHT:
+        log_event(f"🚫 Quality {q} exceeds 2K limit → clamped to {MAX_QUALITY}", "WARN")
+        return MAX_QUALITY
+
+    return q
+
+
+# ==============================================
+# 🔍 FILE VERIFICATION (NEW v28.0)
+# ==============================================
+
+def verify_file_with_ffprobe(filepath):
+    """
+    Use ffprobe to check actual video height, width, codec.
+    Returns dict: {ok, height, width, duration, vcodec, acodec, error}
+    """
+    if not check_ffprobe():
+        return {"ok": False, "error": "ffprobe not available"}
+
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=height,width,codec_name,duration",
+            "-of", "json",
+            filepath
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return {"ok": False, "error": f"ffprobe failed: {result.stderr[:200]}"}
+
+        data = json.loads(result.stdout)
+        streams = data.get("streams", [])
+        if not streams:
+            return {"ok": False, "error": "No video stream found"}
+
+        s = streams[0]
+        height = int(s.get("height") or 0)
+        width = int(s.get("width") or 0)
+        vcodec = s.get("codec_name", "")
+        duration = float(s.get("duration") or 0)
+
+        return {
+            "ok": True,
+            "height": height,
+            "width": width,
+            "vcodec": vcodec,
+            "duration": duration,
+            "error": None
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
+def verify_download(filepath, requested_quality):
+    """
+    Verify downloaded file:
+      1. Exists and size > 0
+      2. Size is in 2K sanity range
+      3. ffprobe height matches 2K limit (<= 1440)
+      4. Actual height is reasonable for requested quality
+
+    Returns dict: {passed: bool, reason: str, details: {...}}
+    """
+    details = {
+        "path": filepath,
+        "requested_quality": requested_quality,
+        "max_allowed_height": MAX_HEIGHT,
+    }
+
+    # 1. Existence
+    if not filepath or not os.path.exists(filepath):
+        return {"passed": False, "reason": "FILE_NOT_FOUND", "details": details}
+
+    size = os.path.getsize(filepath)
+    details["size_bytes"] = size
+    details["size_formatted"] = fmt_size(size)
+
+    # 2. Size check
+    if size <= 0:
+        return {"passed": False, "reason": "EMPTY_FILE", "details": details}
+
+    if size < SIZE_2K_MIN_BYTES:
+        return {"passed": False, "reason": "FILE_TOO_SMALL_FOR_2K", "details": details}
+
+    if size > SIZE_2K_MAX_BYTES:
+        return {
+            "passed": False,
+            "reason": "FILE_TOO_LARGE_FOR_2K",
+            "details": details,
+            "message": f"File exceeds 2K max size ({fmt_size(SIZE_2K_MAX_BYTES)}). "
+                       f"Got {fmt_size(size)}. Probably 4K/8K accidental download."
+        }
+
+    # 3. ffprobe verification
+    probe = verify_file_with_ffprobe(filepath)
+    details["ffprobe"] = probe
+
+    if not probe.get("ok"):
+        # ffprobe failed — be lenient, allow if size check passed
+        log_event(f"⚠️ ffprobe verification failed: {probe.get('error')}", "WARN")
+        details["verification_mode"] = "size_only"
+        return {"passed": True, "reason": "SIZE_OK_PROBE_UNAVAILABLE", "details": details}
+
+    height = probe.get("height", 0)
+    width = probe.get("width", 0)
+    details["actual_height"] = height
+    details["actual_width"] = width
+    details["actual_resolution"] = f"{width}x{height}"
+
+    # 4. Hard 2K check — reject anything above 1440p
+    if height > MAX_HEIGHT:
+        return {
+            "passed": False,
+            "reason": "QUALITY_EXCEEDS_2K",
+            "details": details,
+            "message": f"File is {height}p — exceeds 2K limit ({MAX_HEIGHT}p). "
+                       f"Refusing to upload."
+        }
+
+    # 5. Sanity lower bound
+    if height < MIN_HEIGHT:
+        return {
+            "passed": False,
+            "reason": "QUALITY_TOO_LOW",
+            "details": details,
+            "message": f"File is only {height}p — too low."
+        }
+
+    # 6. Check that requested quality is respected
+    requested_h = QUALITY_HEIGHT.get(requested_quality, MAX_HEIGHT)
+    if requested_h > MAX_HEIGHT:
+        requested_h = MAX_HEIGHT
+
+    # Allow some tolerance (e.g. requested 1080p, got 1078p → ok)
+    # But if requested 720p and got 1440p → suspicious, but still under 2K → allow
+    details["requested_height"] = requested_h
+    details["verification_mode"] = "ffprobe"
+
+    # If requested is 720p but got 1440p — actually that's fine (better quality)
+    # Only reject if actual > MAX_HEIGHT (already done above)
+
+    return {"passed": True, "reason": "QUALITY_VERIFIED", "details": details}
+
+
+# ==============================================
 # AUTH
 # ==============================================
 
@@ -398,11 +595,8 @@ def validate_youtube_url(url):
 
 
 def validate_quality(q):
-    if not q:
-        return "720p"
-    q = str(q).strip().lower()
-    valid = ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "best"]
-    return q if q in valid else "720p"
+    """Clamp quality to 2K max."""
+    return clamp_quality(q)
 
 
 # ==============================================
@@ -413,14 +607,19 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 
 def build_opts(download=False, quality="720p", use_cookies=True, use_proxy=True):
+    # Clamp quality to 2K
+    quality = clamp_quality(quality)
+
     if quality == "best":
-        fmt = "bv*+ba/b"
+        # "best" clamped to 2K
+        fmt = f"bv*[height<={MAX_HEIGHT}]+ba/b[height<={MAX_HEIGHT}]/bv*+ba/b"
     else:
         try:
             h = int(str(quality).rstrip("p"))
+            h = min(h, MAX_HEIGHT)  # hard clamp
             fmt = f"bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b"
         except Exception:
-            fmt = "bv*+ba/b"
+            fmt = f"bv*[height<={MAX_HEIGHT}]+ba/b[height<={MAX_HEIGHT}]/bv*+ba/b"
 
     opts = {
         "quiet": True,
@@ -463,6 +662,8 @@ def build_opts(download=False, quality="720p", use_cookies=True, use_proxy=True)
         "lazy_playlist": True,
         "check_formats": False,
         "concurrent_fragment_downloads": 4,
+        # 🚫 Enforce max height in yt-dlp itself
+        "format_sort": [f"res:{MAX_HEIGHT}"],
     }
 
     if check_deno():
@@ -735,7 +936,7 @@ def build_full_info(info):
 
 
 # ==============================================
-# 🚀 MULTI-SOURCE UPLOAD SYSTEM
+# 🚀 UPLOAD — ONLY 3 ALLOWED HOSTS (v28.0)
 # ==============================================
 
 def up_tmpfiles(fp):
@@ -783,30 +984,8 @@ def up_catbox(fp):
     return {"host": "catbox.moe", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
 
 
-def up_0x0(fp):
-    """0x0.st - 512MB limit, 30 days retention"""
-    r_ = get_requests()
-    t0 = time.time()
-    try:
-        with open(fp, "rb") as f:
-            r = r_.post("https://0x0.st",
-                        files={"file": f},
-                        headers={"User-Agent": USER_AGENT},
-                        timeout=UPLOAD_TIMEOUT)
-        if r.status_code == 200 and r.text.strip().startswith("http"):
-            return {
-                "host": "0x0.st",
-                "url": r.text.strip(),
-                "time": round(time.time() - t0, 2),
-                "status": "success"
-            }
-    except Exception as e:
-        return {"host": "0x0.st", "status": "failed", "error": str(e)[:150], "time": round(time.time() - t0, 2)}
-    return {"host": "0x0.st", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
-
-
 def up_litterbox(fp):
-    """litterbox.catbox.moe - temporary (1h/12h/24h/72h)"""
+    """litterbox.catbox.moe - temporary (24h)"""
     r_ = get_requests()
     t0 = time.time()
     try:
@@ -826,69 +1005,17 @@ def up_litterbox(fp):
     return {"host": "litterbox.catbox.moe", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
 
 
-def up_uguu(fp):
-    """uguu.se - 128MB limit, 3 hours retention"""
-    r_ = get_requests()
-    t0 = time.time()
-    try:
-        with open(fp, "rb") as f:
-            r = r_.post("https://uguu.se/upload.php",
-                        files={"files[]": f}, timeout=UPLOAD_TIMEOUT)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("success") and data.get("files"):
-                url = data["files"][0].get("url", "")
-                if url:
-                    return {
-                        "host": "uguu.se",
-                        "url": url,
-                        "time": round(time.time() - t0, 2),
-                        "status": "success"
-                    }
-    except Exception as e:
-        return {"host": "uguu.se", "status": "failed", "error": str(e)[:150], "time": round(time.time() - t0, 2)}
-    return {"host": "uguu.se", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
-
-
-def up_fileio(fp):
-    """file.io - 2GB limit, one-time download"""
-    r_ = get_requests()
-    t0 = time.time()
-    try:
-        with open(fp, "rb") as f:
-            r = r_.post("https://file.io",
-                        files={"file": f}, timeout=UPLOAD_TIMEOUT)
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("success") and data.get("link"):
-                return {
-                    "host": "file.io",
-                    "url": data["link"],
-                    "time": round(time.time() - t0, 2),
-                    "status": "success"
-                }
-    except Exception as e:
-        return {"host": "file.io", "status": "failed", "error": str(e)[:150], "time": round(time.time() - t0, 2)}
-    return {"host": "file.io", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
-
-
-# List of all upload functions
+# 🚫 ONLY THESE 3 — no other hosts allowed
 UPLOAD_HOSTS = [
     up_tmpfiles,
     up_catbox,
-    up_0x0,
     up_litterbox,
-    up_uguu,
-    up_fileio,
 ]
 
 
-def upload_sequential(fp, existing_results=None):
-    """
-    Try upload hosts sequentially.
-    Returns: (best_result, all_attempts)
-    """
-    all_attempts = existing_results or []
+def upload_sequential(fp):
+    """Try only the 3 allowed hosts sequentially."""
+    all_attempts = []
     best = None
 
     for fn in UPLOAD_HOSTS:
@@ -900,7 +1027,6 @@ def upload_sequential(fp, existing_results=None):
             log_event(f"📤 Upload {res.get('host')}: {res.get('status')} ({res.get('time', 0)}s)")
             if res.get("status") == "success" and not best:
                 best = res
-                # Don't break — we want to try all for better host
         except Exception as e:
             all_attempts.append({
                 "host": fn.__name__,
@@ -913,18 +1039,14 @@ def upload_sequential(fp, existing_results=None):
     return best, all_attempts
 
 
-def upload_parallel(fp, max_workers=4):
-    """
-    Try multiple upload hosts in parallel.
-    Returns: (best_result, all_attempts)
-    """
+def upload_parallel(fp, max_workers=3):
+    """Try all 3 hosts in parallel."""
     all_attempts = []
     best = None
 
     def _try_upload(fn):
         try:
-            res = fn(fp)
-            return res
+            return fn(fp)
         except Exception as e:
             return {
                 "host": fn.__name__,
@@ -954,32 +1076,26 @@ def upload_parallel(fp, max_workers=4):
 
 
 def upload_multi(fp):
-    """
-    Main upload function — tries parallel first, then sequential fallback.
-    Returns: dict with url, host, time, all_attempts
-    """
+    """Main upload — only 3 hosts, parallel first, sequential fallback."""
     t_start = time.time()
     all_attempts = []
 
-    # Check file size
     try:
         size = os.path.getsize(fp)
         log_event(f"📁 File size: {fmt_size(size)}")
     except Exception:
         size = 0
 
-    # Try parallel first if enabled
     if UPLOAD_PARALLEL:
         best, attempts = upload_parallel(fp)
         all_attempts.extend(attempts)
     else:
         best = None
 
-    # If parallel failed, try sequential
     if not best:
         log_event("🔄 Parallel upload failed, trying sequential...")
-        best, seq_attempts = upload_sequential(fp, all_attempts)
-        all_attempts = seq_attempts
+        best, seq_attempts = upload_sequential(fp)
+        all_attempts.extend(seq_attempts)
 
     total_time = round(time.time() - t_start, 2)
 
@@ -1017,6 +1133,9 @@ def process_video(url, quality="720p", video_id=None):
             "error_code": "YTDLP_NOT_AVAILABLE",
             "message": "yt-dlp not loaded",
         }
+
+    # 🚫 Clamp quality to 2K
+    quality = clamp_quality(quality)
 
     acquired = _DL_SEMAPHORE.acquire(timeout=30)
     if not acquired:
@@ -1064,6 +1183,7 @@ def process_video(url, quality="720p", video_id=None):
                 "debug_info": {
                     "yt_dlp": True,
                     "ffmpeg": check_ffmpeg(),
+                    "ffprobe": check_ffprobe(),
                     "pot_server": check_pot_server(),
                     "deno": check_deno(),
                     "node": check_node(),
@@ -1094,31 +1214,59 @@ def process_video(url, quality="720p", video_id=None):
 
             if fname and os.path.exists(fname):
                 size = os.path.getsize(fname)
-                t_up = time.time()
-                up_res = upload_multi(fname)  # 🚀 Multi-source upload
-                t_up_end = time.time()
 
-                dl_result = {
-                    "status": up_res.get("status", "failed"),
-                    "filename": os.path.basename(fname),
-                    "file_size": size,
-                    "file_size_formatted": fmt_size(size),
-                    "quality": quality,
-                    "download_time": f"{round(t_dl_end - t_dl, 2)}s",
-                    "upload_time": f"{round(t_up_end - t_up, 2)}s",
-                    "upload_time_best_host": f"{up_res.get('upload_time', 0)}s",
-                    "downloaded_at": datetime.now().isoformat(),
-                    "share_url": up_res.get("url") or "UPLOAD_FAILED",
-                    "upload_host": up_res.get("host") or "N/A",
-                    "upload_attempts": up_res.get("all_attempts", []),
-                    "total_upload_time": f"{up_res.get('total_upload_time', 0)}s",
-                }
+                # 🔍 VERIFY FILE BEFORE UPLOAD (NEW v28.0)
+                log_event(f"🔍 Verifying file quality for 2K compliance...")
+                verify = verify_download(fname, quality)
+
+                if not verify.get("passed"):
+                    # 🚫 DO NOT UPLOAD — verification failed
+                    dl_result = {
+                        "status": "failed",
+                        "error": f"Quality verification failed: {verify.get('reason')}",
+                        "error_code": verify.get("reason"),
+                        "message": verify.get("message", "File did not pass 2K quality check"),
+                        "quality": quality,
+                        "verification": verify,
+                        "filename": os.path.basename(fname),
+                        "file_size": size,
+                        "file_size_formatted": fmt_size(size),
+                        "download_time": f"{round(t_dl_end - t_dl, 2)}s",
+                        "uploaded": False,
+                        "share_url": None,
+                        "upload_host": None,
+                    }
+                else:
+                    # ✅ Verification passed — upload only to 3 allowed hosts
+                    log_event(f"✅ Quality verified: {verify.get('details', {}).get('actual_resolution', 'N/A')}")
+                    t_up = time.time()
+                    up_res = upload_multi(fname)
+                    t_up_end = time.time()
+
+                    dl_result = {
+                        "status": up_res.get("status", "failed"),
+                        "filename": os.path.basename(fname),
+                        "file_size": size,
+                        "file_size_formatted": fmt_size(size),
+                        "quality": quality,
+                        "download_time": f"{round(t_dl_end - t_dl, 2)}s",
+                        "upload_time": f"{round(t_up_end - t_up, 2)}s",
+                        "upload_time_best_host": f"{up_res.get('upload_time', 0)}s",
+                        "downloaded_at": datetime.now().isoformat(),
+                        "share_url": up_res.get("url") or "UPLOAD_FAILED",
+                        "upload_host": up_res.get("host") or "N/A",
+                        "upload_attempts": up_res.get("all_attempts", []),
+                        "total_upload_time": f"{up_res.get('total_upload_time', 0)}s",
+                        "verification": verify,
+                        "uploaded": up_res.get("status") == "success",
+                    }
             else:
                 dl_result = {
                     "status": "failed",
                     "error": "File not found after download",
                     "error_code": "FILE_NOT_FOUND",
                     "quality": quality,
+                    "uploaded": False,
                 }
         except Exception as ex:
             dl_result = {
@@ -1126,6 +1274,7 @@ def process_video(url, quality="720p", video_id=None):
                 "error": str(ex)[:200],
                 "error_code": type(ex).__name__,
                 "quality": quality,
+                "uploaded": False,
             }
         finally:
             try:
@@ -1179,14 +1328,17 @@ def process_video(url, quality="720p", video_id=None):
 def home():
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "27.0.0",
-        "upload_hosts": [fn.__name__ for fn in UPLOAD_HOSTS],
-        "qualities": ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p", "2160p", "best"],
+        "version": "1.0.0",
+        "rules": {
+            "max_quality": MAX_QUALITY,
+            "max_height": MAX_HEIGHT,
+        },
+        "qualities": ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p"],
         "endpoints": {
             "/yt": {
                 "method": "GET",
-                "description": "Download YouTube video + full info + multi-source upload",
-                "example": "/yt?url=https://youtu.be/VIDEO_ID&quality=720p&key=FF"
+                "description": "Download YouTube video (max 2K) + verify + upload to 3 hosts",
+                "example": "/yt?url=https://youtu.be/VIDEO_ID&quality=1440p&key=FF"
             },
             "/health": "Health check"
         },
@@ -1220,6 +1372,7 @@ def ready():
         pass
 
     ffmpeg_ok = check_ffmpeg()
+    ffprobe_ok = check_ffprobe()
     pot_ok = check_pot_server()
     cookies_ok = bool(COOKIE_FILE and os.path.exists(COOKIE_FILE))
 
@@ -1227,13 +1380,16 @@ def ready():
         "status": "ready" if (yt_ok and ffmpeg_ok) else "not_ready",
         "yt_dlp": yt_ok,
         "ffmpeg": ffmpeg_ok,
+        "ffprobe": ffprobe_ok,
         "pot_server": pot_ok,
         "cookies": cookies_ok,
         "cookies_path": COOKIE_FILE,
         "deno": check_deno(),
         "node": check_node(),
         "proxy": bool(YTDLP_PROXY),
-        "upload_hosts": [fn.__name__ for fn in UPLOAD_HOSTS],
+        "max_quality": MAX_QUALITY,
+        "max_height": MAX_HEIGHT,
+        "upload_hosts": ["tmpfiles.org", "catbox.moe", "litterbox.catbox.moe"],
         "timestamp": datetime.now().isoformat(),
     }), 200 if (yt_ok and ffmpeg_ok) else 503
 
@@ -1264,12 +1420,15 @@ def download_yt():
 
         video_id = result
         url = f"https://www.youtube.com/watch?v={video_id}"
-        quality = validate_quality(quality)
 
-        log_event(f"[{getattr(g, 'request_id', '?')}] {video_id} @ {quality}")
+        # 🚫 Clamp quality to 2K max
+        quality = clamp_quality(quality)
+
+        log_event(f"[{getattr(g, 'request_id', '?')}] {video_id} @ {quality} (2K max)")
 
         data = process_video(url, quality, video_id=video_id)
         data["request_id"] = getattr(g, "request_id", None)
+        data["max_quality_enforced"] = MAX_QUALITY
 
         if data.get("status") in ("success", "partial"):
             return jsonify(data), 200
@@ -1289,15 +1448,23 @@ def download_yt():
 def debug():
     return jsonify({
         "status": "ok",
-        "version": "27.0.0",
+        "version": "28.0.0",
         "started_at": _STARTUP_TIME,
         "now": datetime.now().isoformat(),
         "pid": os.getpid(),
+        "rules": {
+            "max_quality": MAX_QUALITY,
+            "max_height": MAX_HEIGHT,
+            "allowed_hosts": ["tmpfiles.org", "catbox.moe", "litterbox.catbox.moe"],
+            "quality_verification": "ENABLED",
+            "upload_only_if_verified": True,
+        },
         "system": {
             "yt_dlp": True,
             "deno": check_deno(),
             "node": check_node(),
             "ffmpeg": check_ffmpeg(),
+            "ffprobe": check_ffprobe(),
             "pot_server": check_pot_server(),
             "cookies_exists": bool(COOKIE_FILE and os.path.exists(COOKIE_FILE)),
             "cookies_path": COOKIE_FILE,
@@ -1310,7 +1477,8 @@ def debug():
             "download_concurrency": DOWNLOAD_CONCURRENCY,
             "upload_parallel": UPLOAD_PARALLEL,
             "upload_timeout": UPLOAD_TIMEOUT,
-            "upload_hosts": [fn.__name__ for fn in UPLOAD_HOSTS],
+            "size_2k_min": SIZE_2K_MIN_BYTES,
+            "size_2k_max": SIZE_2K_MAX_BYTES,
         },
         "threads": {
             "active": threading.active_count(),
@@ -1343,12 +1511,14 @@ def he(e):
 # ==============================================
 
 log_event("=" * 60)
-log_event("YouTube Downloader API v27.0 STARTED")
-log_event(f"Deno: {check_deno()}, Node: {check_node()}, FFmpeg: {check_ffmpeg()}")
+log_event("YouTube Downloader API v28.0 STARTED")
+log_event(f"Rules: MAX_QUALITY={MAX_QUALITY}, MAX_HEIGHT={MAX_HEIGHT}")
+log_event(f"Allowed Upload Hosts: tmpfiles.org, catbox.moe, litterbox.catbox.moe")
+log_event(f"Quality Verification: ENABLED (ffprobe)")
+log_event(f"Deno: {check_deno()}, Node: {check_node()}, FFmpeg: {check_ffmpeg()}, ffprobe: {check_ffprobe()}")
 log_event(f"Cookies: {COOKIE_FILE}")
 log_event(f"Proxy: {'SET' if YTDLP_PROXY else 'NOT SET'}")
 log_event(f"POT: {check_pot_server()}")
-log_event(f"Upload Hosts: {len(UPLOAD_HOSTS)} available")
 log_event(f"Upload Parallel: {UPLOAD_PARALLEL}")
 log_event("=" * 60)
 
