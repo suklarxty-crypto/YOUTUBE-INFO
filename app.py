@@ -1,12 +1,14 @@
-# app.py - YouTube Downloader API v28.0 (3 HOSTS ONLY + 2K MAX + QUALITY VERIFY)
+# app.py - YouTube Downloader API v29.0 (3 HOSTS ONLY + 2K MAX + QUALITY VERIFY + CACHE)
 # Made by @KINGFFAIAK47x · ANSH AFT
 # FIX: /etc/secrets read-only → copy to /tmp automatically
+# NEW: Cache system — same URL fetch karega toh cached result dega (DMS gaya = cache se)
 # RULES:
 #   - Upload ONLY to: tmpfiles.org, catbox.moe, litterbox.catbox.moe
 #   - Max quality: 1440p (2K). Anything above → forced to 1440p
 #   - Verify downloaded file quality BEFORE upload
 #   - Verify file size is in 2K range BEFORE upload
 #   - If quality/size check fails → DO NOT upload
+#   - Same URL + same quality → cached result return (no re-download)
 
 import os
 import sys
@@ -43,7 +45,7 @@ UPLOAD_TIMEOUT = int(os.environ.get("UPLOAD_TIMEOUT", "120"))
 UPLOAD_PARALLEL = os.environ.get("UPLOAD_PARALLEL", "true").lower() == "true"
 
 # ==============================================
-# 🚫 HARD LIMITS (NEW v28.0)
+# 🚫 HARD LIMITS (v29.0)
 # ==============================================
 
 MAX_QUALITY = "1440p"          # 2K — anything above gets clamped
@@ -59,13 +61,34 @@ QUALITY_HEIGHT = {
 }
 
 # 2K file size sanity range (video only, no huge 4K/8K)
-# 2K ~ 1440p video: rough min/max bytes for sanity check
 SIZE_2K_MIN_BYTES = 1 * 1024 * 1024         # 1 MB min (very short clips)
 SIZE_2K_MAX_BYTES = 6 * 1024 * 1024 * 1024  # 6 GB max (long 2K video)
-# If file bigger than this → reject (probably 4K accidentally)
 
 OUTPUT_DIR = "/tmp/youtube_data"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ==============================================
+# 💾 CACHE CONFIG (v29.0)
+# ==============================================
+
+CACHE_ENABLED = os.environ.get("CACHE_ENABLED", "true").lower() == "true"
+CACHE_TTL = int(os.environ.get("CACHE_TTL", "3600"))  # 1 hour default
+CACHE_MAX_ENTRIES = int(os.environ.get("CACHE_MAX_ENTRIES", "500"))
+CACHE_DIR = os.path.join(OUTPUT_DIR, "cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# In-memory cache: {cache_key: {"data": ..., "timestamp": ..., "hits": ...}}
+_CACHE_STORE = {}
+_CACHE_LOCK = threading.Lock()
+
+# Cache stats
+_CACHE_STATS = {
+    "hits": 0,
+    "misses": 0,
+    "evictions": 0,
+    "expired": 0,
+    "total_cached": 0,
+}
 
 # ==============================================
 # LOGGING
@@ -86,7 +109,159 @@ def log_event(msg, level="INFO"):
 
 
 # ==============================================
-# COOKIE RESOLVER - FIXES READ-ONLY FS ERROR
+# 💾 CACHE FUNCTIONS (v29.0)
+# ==============================================
+
+def make_cache_key(video_id, quality):
+    """Create unique cache key from video_id + quality."""
+    raw = f"{video_id}:{quality}:{MAX_HEIGHT}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def cache_get(cache_key):
+    """Get cached entry if exists and not expired."""
+    if not CACHE_ENABLED:
+        return None
+
+    with _CACHE_LOCK:
+        entry = _CACHE_STORE.get(cache_key)
+
+        if not entry:
+            _CACHE_STATS["misses"] += 1
+            return None
+
+        # Check TTL
+        age = time.time() - entry["timestamp"]
+        if age > CACHE_TTL:
+            del _CACHE_STORE[cache_key]
+            _CACHE_STATS["expired"] += 1
+            _CACHE_STATS["misses"] += 1
+            log_event(f"⏰ Cache EXPIRED: {cache_key[:8]}... (age: {int(age)}s)", "INFO")
+            return None
+
+        # Cache hit!
+        entry["hits"] += 1
+        _CACHE_STATS["hits"] += 1
+        log_event(f"✅ Cache HIT: {cache_key[:8]}... (age: {int(age)}s, hits: {entry['hits']})")
+        return entry["data"]
+
+
+def cache_set(cache_key, data):
+    """Store result in cache."""
+    if not CACHE_ENABLED:
+        return
+
+    with _CACHE_LOCK:
+        # Evict if too many entries
+        if len(_CACHE_STORE) >= CACHE_MAX_ENTRIES:
+            _evict_cache()
+
+        _CACHE_STORE[cache_key] = {
+            "data": data,
+            "timestamp": time.time(),
+            "hits": 0,
+            "video_id": data.get("video_id", "?"),
+            "quality": data.get("download", {}).get("quality", "?"),
+        }
+        _CACHE_STATS["total_cached"] = len(_CACHE_STORE)
+        log_event(f"💾 Cache SET: {cache_key[:8]}... (total: {len(_CACHE_STORE)})")
+
+
+def _evict_cache():
+    """Remove oldest entries when cache is full (LRU-ish)."""
+    if not _CACHE_STORE:
+        return
+
+    # Sort by timestamp (oldest first)
+    sorted_keys = sorted(
+        _CACHE_STORE.keys(),
+        key=lambda k: _CACHE_STORE[k]["timestamp"]
+    )
+
+    # Remove oldest 10%
+    to_remove = max(1, len(sorted_keys) // 10)
+    for k in sorted_keys[:to_remove]:
+        del _CACHE_STORE[k]
+        _CACHE_STATS["evictions"] += 1
+
+    log_event(f"🗑️ Cache evicted {to_remove} entries", "WARN")
+
+
+def cache_invalidate(cache_key=None):
+    """Invalidate specific cache key or entire cache."""
+    with _CACHE_LOCK:
+        if cache_key:
+            if cache_key in _CACHE_STORE:
+                del _CACHE_STORE[cache_key]
+                return True
+            return False
+        else:
+            count = len(_CACHE_STORE)
+            _CACHE_STORE.clear()
+            _CACHE_STATS["total_cached"] = 0
+            return count
+
+
+def cache_cleanup_expired():
+    """Remove expired entries from cache."""
+    if not CACHE_ENABLED:
+        return 0
+
+    now = time.time()
+    removed = 0
+
+    with _CACHE_LOCK:
+        keys_to_remove = []
+        for k, v in _CACHE_STORE.items():
+            if now - v["timestamp"] > CACHE_TTL:
+                keys_to_remove.append(k)
+
+        for k in keys_to_remove:
+            del _CACHE_STORE[k]
+            removed += 1
+            _CACHE_STATS["expired"] += 1
+
+        _CACHE_STATS["total_cached"] = len(_CACHE_STORE)
+
+    if removed:
+        log_event(f"🧹 Cache cleanup: removed {removed} expired entries")
+
+    return removed
+
+
+def get_cache_stats():
+    """Get cache statistics."""
+    with _CACHE_LOCK:
+        total = _CACHE_STATS["hits"] + _CACHE_STATS["misses"]
+        hit_rate = (_CACHE_STATS["hits"] / total * 100) if total > 0 else 0
+
+        return {
+            "enabled": CACHE_ENABLED,
+            "ttl_seconds": CACHE_TTL,
+            "max_entries": CACHE_MAX_ENTRIES,
+            "current_entries": len(_CACHE_STORE),
+            "hits": _CACHE_STATS["hits"],
+            "misses": _CACHE_STATS["misses"],
+            "hit_rate": f"{hit_rate:.1f}%",
+            "evictions": _CACHE_STATS["evictions"],
+            "expired": _CACHE_STATS["expired"],
+        }
+
+
+# Cache cleanup thread
+def _cache_cleanup_loop():
+    while not _SHUTTING_DOWN.is_set():
+        try:
+            time.sleep(300)  # every 5 minutes
+            if _SHUTTING_DOWN.is_set():
+                break
+            cache_cleanup_expired()
+        except Exception as e:
+            log_event(f"Cache cleanup error: {e}", "ERROR")
+
+
+# ==============================================
+# COOKIE RESOLVER
 # ==============================================
 
 def resolve_cookie_file():
@@ -352,14 +527,10 @@ def cleanup_old_files(max_age=1800):
 
 
 # ==============================================
-# 🎯 QUALITY CLAMPING (NEW v28.0)
+# 🎯 QUALITY CLAMPING
 # ==============================================
 
 def clamp_quality(q):
-    """
-    Clamp requested quality to MAX_QUALITY (1440p / 2K).
-    Anything above 1440p gets forced down to 1440p.
-    """
     if not q:
         return MAX_QUALITY
     q = str(q).strip().lower()
@@ -380,14 +551,10 @@ def clamp_quality(q):
 
 
 # ==============================================
-# 🔍 FILE VERIFICATION (NEW v28.0)
+# 🔍 FILE VERIFICATION
 # ==============================================
 
 def verify_file_with_ffprobe(filepath):
-    """
-    Use ffprobe to check actual video height, width, codec.
-    Returns dict: {ok, height, width, duration, vcodec, acodec, error}
-    """
     if not check_ffprobe():
         return {"ok": False, "error": "ffprobe not available"}
 
@@ -427,15 +594,6 @@ def verify_file_with_ffprobe(filepath):
 
 
 def verify_download(filepath, requested_quality):
-    """
-    Verify downloaded file:
-      1. Exists and size > 0
-      2. Size is in 2K sanity range
-      3. ffprobe height matches 2K limit (<= 1440)
-      4. Actual height is reasonable for requested quality
-
-    Returns dict: {passed: bool, reason: str, details: {...}}
-    """
     details = {
         "path": filepath,
         "requested_quality": requested_quality,
@@ -471,7 +629,6 @@ def verify_download(filepath, requested_quality):
     details["ffprobe"] = probe
 
     if not probe.get("ok"):
-        # ffprobe failed — be lenient, allow if size check passed
         log_event(f"⚠️ ffprobe verification failed: {probe.get('error')}", "WARN")
         details["verification_mode"] = "size_only"
         return {"passed": True, "reason": "SIZE_OK_PROBE_UNAVAILABLE", "details": details}
@@ -482,7 +639,7 @@ def verify_download(filepath, requested_quality):
     details["actual_width"] = width
     details["actual_resolution"] = f"{width}x{height}"
 
-    # 4. Hard 2K check — reject anything above 1440p
+    # 4. Hard 2K check
     if height > MAX_HEIGHT:
         return {
             "passed": False,
@@ -501,18 +658,12 @@ def verify_download(filepath, requested_quality):
             "message": f"File is only {height}p — too low."
         }
 
-    # 6. Check that requested quality is respected
     requested_h = QUALITY_HEIGHT.get(requested_quality, MAX_HEIGHT)
     if requested_h > MAX_HEIGHT:
         requested_h = MAX_HEIGHT
 
-    # Allow some tolerance (e.g. requested 1080p, got 1078p → ok)
-    # But if requested 720p and got 1440p → suspicious, but still under 2K → allow
     details["requested_height"] = requested_h
     details["verification_mode"] = "ffprobe"
-
-    # If requested is 720p but got 1440p — actually that's fine (better quality)
-    # Only reject if actual > MAX_HEIGHT (already done above)
 
     return {"passed": True, "reason": "QUALITY_VERIFIED", "details": details}
 
@@ -595,7 +746,6 @@ def validate_youtube_url(url):
 
 
 def validate_quality(q):
-    """Clamp quality to 2K max."""
     return clamp_quality(q)
 
 
@@ -607,16 +757,14 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 
 def build_opts(download=False, quality="720p", use_cookies=True, use_proxy=True):
-    # Clamp quality to 2K
     quality = clamp_quality(quality)
 
     if quality == "best":
-        # "best" clamped to 2K
         fmt = f"bv*[height<={MAX_HEIGHT}]+ba/b[height<={MAX_HEIGHT}]/bv*+ba/b"
     else:
         try:
             h = int(str(quality).rstrip("p"))
-            h = min(h, MAX_HEIGHT)  # hard clamp
+            h = min(h, MAX_HEIGHT)
             fmt = f"bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b"
         except Exception:
             fmt = f"bv*[height<={MAX_HEIGHT}]+ba/b[height<={MAX_HEIGHT}]/bv*+ba/b"
@@ -662,7 +810,6 @@ def build_opts(download=False, quality="720p", use_cookies=True, use_proxy=True)
         "lazy_playlist": True,
         "check_formats": False,
         "concurrent_fragment_downloads": 4,
-        # 🚫 Enforce max height in yt-dlp itself
         "format_sort": [f"res:{MAX_HEIGHT}"],
     }
 
@@ -936,11 +1083,10 @@ def build_full_info(info):
 
 
 # ==============================================
-# 🚀 UPLOAD — ONLY 3 ALLOWED HOSTS (v28.0)
+# 🚀 UPLOAD — ONLY 3 ALLOWED HOSTS
 # ==============================================
 
 def up_tmpfiles(fp):
-    """tmpfiles.org - 1GB limit, 1 hour retention"""
     r_ = get_requests()
     t0 = time.time()
     try:
@@ -964,7 +1110,6 @@ def up_tmpfiles(fp):
 
 
 def up_catbox(fp):
-    """catbox.moe - 200MB limit, permanent"""
     r_ = get_requests()
     t0 = time.time()
     try:
@@ -985,7 +1130,6 @@ def up_catbox(fp):
 
 
 def up_litterbox(fp):
-    """litterbox.catbox.moe - temporary (24h)"""
     r_ = get_requests()
     t0 = time.time()
     try:
@@ -1005,7 +1149,6 @@ def up_litterbox(fp):
     return {"host": "litterbox.catbox.moe", "status": "failed", "error": "Invalid response", "time": round(time.time() - t0, 2)}
 
 
-# 🚫 ONLY THESE 3 — no other hosts allowed
 UPLOAD_HOSTS = [
     up_tmpfiles,
     up_catbox,
@@ -1014,7 +1157,6 @@ UPLOAD_HOSTS = [
 
 
 def upload_sequential(fp):
-    """Try only the 3 allowed hosts sequentially."""
     all_attempts = []
     best = None
 
@@ -1040,7 +1182,6 @@ def upload_sequential(fp):
 
 
 def upload_parallel(fp, max_workers=3):
-    """Try all 3 hosts in parallel."""
     all_attempts = []
     best = None
 
@@ -1076,7 +1217,6 @@ def upload_parallel(fp, max_workers=3):
 
 
 def upload_multi(fp):
-    """Main upload — only 3 hosts, parallel first, sequential fallback."""
     t_start = time.time()
     all_attempts = []
 
@@ -1120,11 +1260,28 @@ def upload_multi(fp):
 
 
 # ==============================================
-# PROCESS VIDEO
+# PROCESS VIDEO (WITH CACHE)
 # ==============================================
 
 def process_video(url, quality="720p", video_id=None):
     t_start = time.time()
+
+    # 🚫 Clamp quality
+    quality = clamp_quality(quality)
+
+    # 💾 CHECK CACHE FIRST (v29.0)
+    cache_key = make_cache_key(video_id, quality) if video_id else None
+    if cache_key:
+        cached = cache_get(cache_key)
+        if cached:
+            # Add cache metadata
+            cached_copy = dict(cached)
+            cached_copy["cached"] = True
+            cached_copy["cache_key"] = cache_key
+            cached_copy["cache_age_seconds"] = round(time.time() - _CACHE_STORE.get(cache_key, {}).get("timestamp", 0), 2) if cache_key in _CACHE_STORE else 0
+            cached_copy["total_time"] = f"{round(time.time() - t_start, 2)}s (CACHED)"
+            cached_copy["request_id"] = getattr(g, "request_id", None)
+            return cached_copy
 
     yt = get_yt_dlp()
     if not yt:
@@ -1133,9 +1290,6 @@ def process_video(url, quality="720p", video_id=None):
             "error_code": "YTDLP_NOT_AVAILABLE",
             "message": "yt-dlp not loaded",
         }
-
-    # 🚫 Clamp quality to 2K
-    quality = clamp_quality(quality)
 
     acquired = _DL_SEMAPHORE.acquire(timeout=30)
     if not acquired:
@@ -1215,12 +1369,11 @@ def process_video(url, quality="720p", video_id=None):
             if fname and os.path.exists(fname):
                 size = os.path.getsize(fname)
 
-                # 🔍 VERIFY FILE BEFORE UPLOAD (NEW v28.0)
+                # 🔍 VERIFY FILE BEFORE UPLOAD
                 log_event(f"🔍 Verifying file quality for 2K compliance...")
                 verify = verify_download(fname, quality)
 
                 if not verify.get("passed"):
-                    # 🚫 DO NOT UPLOAD — verification failed
                     dl_result = {
                         "status": "failed",
                         "error": f"Quality verification failed: {verify.get('reason')}",
@@ -1237,7 +1390,6 @@ def process_video(url, quality="720p", video_id=None):
                         "upload_host": None,
                     }
                 else:
-                    # ✅ Verification passed — upload only to 3 allowed hosts
                     log_event(f"✅ Quality verified: {verify.get('details', {}).get('actual_resolution', 'N/A')}")
                     t_up = time.time()
                     up_res = upload_multi(fname)
@@ -1296,7 +1448,7 @@ def process_video(url, quality="720p", video_id=None):
                 "total_time": f"{total_time}s",
             }
 
-        return {
+        result = {
             "status": "success" if dl_result.get("status") == "success" else "partial",
             "total_time": f"{total_time}s",
             "download": dl_result,
@@ -1315,10 +1467,20 @@ def process_video(url, quality="720p", video_id=None):
             "heatmap": full.get("heatmap"),
             "formats": full.get("formats", []),
             "format_count": full.get("format_count", 0),
+            "video_id": video_id,
+            "cached": False,
             "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"}
         }
+
+        # 💾 STORE IN CACHE if successful upload
+        if cache_key and dl_result.get("status") == "success":
+            cache_set(cache_key, result)
+            log_event(f"💾 Result cached for: {video_id} @ {quality}")
+
+        return result
     finally:
         _DL_SEMAPHORE.release()
+
 
 # ==============================================
 # 🚀 ROUTES
@@ -1333,14 +1495,22 @@ def home():
             "max_quality": MAX_QUALITY,
             "max_height": MAX_HEIGHT,
         },
+        "features": {
+            "cache_system": CACHE_ENABLED,
+            "cache_ttl_seconds": CACHE_TTL,
+            "quality_verification": True,
+            "upload_hosts": ["tmpfiles.org", "catbox.moe", "litterbox.catbox.moe"],
+        },
         "qualities": ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p"],
         "endpoints": {
             "/yt": {
                 "method": "GET",
-                "description": "Download YouTube video (max 2K) + verify + upload to 3 hosts",
+                "description": "Download YouTube video (max 2K) + verify + upload to 3 hosts. Same URL → cached result.",
                 "example": "/yt?url=https://youtu.be/VIDEO_ID&quality=1440p&key=FF"
             },
-            "/health": "Health check"
+            "/health": "Health check",
+            "/cache/stats": "Cache statistics",
+            "/cache/clear": "Clear cache (admin)"
         },
         "credit": {
             "username": "@KINGFFAIAK47x",
@@ -1360,6 +1530,7 @@ def health():
         "status": "healthy" if not _SHUTTING_DOWN.is_set() else "shutting_down",
         "timestamp": datetime.now().isoformat(),
         "started_at": _STARTUP_TIME,
+        "cache": get_cache_stats(),
     }), 200
 
 
@@ -1390,8 +1561,40 @@ def ready():
         "max_quality": MAX_QUALITY,
         "max_height": MAX_HEIGHT,
         "upload_hosts": ["tmpfiles.org", "catbox.moe", "litterbox.catbox.moe"],
+        "cache": get_cache_stats(),
         "timestamp": datetime.now().isoformat(),
     }), 200 if (yt_ok and ffmpeg_ok) else 503
+
+
+@app.route('/cache/stats', methods=['GET'])
+def cache_stats_route():
+    return jsonify({
+        "status": "ok",
+        "cache": get_cache_stats(),
+        "timestamp": datetime.now().isoformat(),
+    }), 200
+
+
+@app.route('/cache/clear', methods=['GET', 'POST'])
+@require_api_key
+def cache_clear_route():
+    """Clear entire cache or specific key."""
+    cache_key = request.args.get("key", "").strip()
+
+    if cache_key:
+        ok = cache_invalidate(cache_key)
+        return jsonify({
+            "status": "ok" if ok else "not_found",
+            "message": f"Cache key {'cleared' if ok else 'not found'}: {cache_key}",
+            "cache_key": cache_key,
+        }), 200 if ok else 404
+    else:
+        count = cache_invalidate()
+        return jsonify({
+            "status": "ok",
+            "message": f"Cache cleared: {count} entries removed",
+            "cleared_count": count,
+        }), 200
 
 
 @app.route('/yt', methods=['GET'])
@@ -1400,6 +1603,7 @@ def download_yt():
     try:
         url_raw = request.args.get("url", "").strip()
         quality = request.args.get("quality", "720p").strip()
+        no_cache = request.args.get("no_cache", "false").lower() == "true"
 
         if not url_raw:
             return jsonify({
@@ -1421,8 +1625,14 @@ def download_yt():
         video_id = result
         url = f"https://www.youtube.com/watch?v={video_id}"
 
-        # 🚫 Clamp quality to 2K max
+        # 🚫 Clamp quality
         quality = clamp_quality(quality)
+
+        # Handle no_cache
+        if no_cache:
+            cache_key = make_cache_key(video_id, quality)
+            cache_invalidate(cache_key)
+            log_event(f"🗑️ Cache bypassed for: {video_id}")
 
         log_event(f"[{getattr(g, 'request_id', '?')}] {video_id} @ {quality} (2K max)")
 
@@ -1448,7 +1658,7 @@ def download_yt():
 def debug():
     return jsonify({
         "status": "ok",
-        "version": "28.0.0",
+        "version": "29.0.0",
         "started_at": _STARTUP_TIME,
         "now": datetime.now().isoformat(),
         "pid": os.getpid(),
@@ -1459,6 +1669,7 @@ def debug():
             "quality_verification": "ENABLED",
             "upload_only_if_verified": True,
         },
+        "cache": get_cache_stats(),
         "system": {
             "yt_dlp": True,
             "deno": check_deno(),
@@ -1479,6 +1690,9 @@ def debug():
             "upload_timeout": UPLOAD_TIMEOUT,
             "size_2k_min": SIZE_2K_MIN_BYTES,
             "size_2k_max": SIZE_2K_MAX_BYTES,
+            "cache_enabled": CACHE_ENABLED,
+            "cache_ttl": CACHE_TTL,
+            "cache_max_entries": CACHE_MAX_ENTRIES,
         },
         "threads": {
             "active": threading.active_count(),
@@ -1511,16 +1725,22 @@ def he(e):
 # ==============================================
 
 log_event("=" * 60)
-log_event("YouTube Downloader API v28.0 STARTED")
+log_event("YouTube Downloader API v29.0 STARTED")
 log_event(f"Rules: MAX_QUALITY={MAX_QUALITY}, MAX_HEIGHT={MAX_HEIGHT}")
 log_event(f"Allowed Upload Hosts: tmpfiles.org, catbox.moe, litterbox.catbox.moe")
 log_event(f"Quality Verification: ENABLED (ffprobe)")
+log_event(f"Cache System: {'ENABLED' if CACHE_ENABLED else 'DISABLED'} (TTL: {CACHE_TTL}s)")
 log_event(f"Deno: {check_deno()}, Node: {check_node()}, FFmpeg: {check_ffmpeg()}, ffprobe: {check_ffprobe()}")
 log_event(f"Cookies: {COOKIE_FILE}")
 log_event(f"Proxy: {'SET' if YTDLP_PROXY else 'NOT SET'}")
 log_event(f"POT: {check_pot_server()}")
 log_event(f"Upload Parallel: {UPLOAD_PARALLEL}")
 log_event("=" * 60)
+
+# Start cache cleanup thread
+_cache_cleanup_thread = threading.Thread(target=_cache_cleanup_loop, daemon=True)
+_cache_cleanup_thread.start()
+log_event("🧹 Cache cleanup thread started")
 
 
 if __name__ == "__main__":
