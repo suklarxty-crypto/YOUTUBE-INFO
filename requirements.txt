@@ -3,3 +3,4 @@ yt-dlp>=2025.11.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 bgutil-ytdlp-pot-provider>=1.2.0
+gunicorn>=23.0.0
