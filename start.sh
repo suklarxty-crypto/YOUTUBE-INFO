@@ -1,66 +1,60 @@
-#!/bin/sh
-set -eu
+#!/bin/bash
+set -e
 
-POT_LOG=/tmp/pot.log
-POT_PID=""
-GUNICORN_PID=""
+echo "=========================================="
+echo "🎬 YouTube Downloader API v29.3"
+echo "=========================================="
 
-cleanup() {
-  status=$?
-  if [ -n "${GUNICORN_PID}" ]; then
-    kill -TERM "${GUNICORN_PID}" 2>/dev/null || true
-  fi
-  if [ -n "${POT_PID}" ]; then
-    kill -TERM "${POT_PID}" 2>/dev/null || true
-  fi
-  exit "$status"
-}
-trap cleanup INT TERM HUP
+mkdir -p /tmp/youtube_data/downloads
 
+# ---- Start bgutil POT server ----
 echo "Starting bgutil POT server on 127.0.0.1:4416..."
-node /app/bgutil/server/build/main.js --host 127.0.0.1 --port 4416 >"${POT_LOG}" 2>&1 &
+node /app/bgutil/server/build/main.js --port 4416 &
 POT_PID=$!
+echo "POT PID=$POT_PID"
 
-echo "POT PID=${POT_PID}"
-ready=0
-for i in $(seq 1 20); do
-  if ! kill -0 "${POT_PID}" 2>/dev/null; then
-    echo "POT server exited during startup"
-    cat "${POT_LOG}" || true
-    exit 1
-  fi
-  if curl -fsS --max-time 2 http://127.0.0.1:4416/ping >/dev/null 2>&1; then
-    ready=1
-    echo "POT server ready"
-    break
-  fi
-  echo "Waiting for POT server... (${i}/20)"
-  sleep 1
+# ---- Wait for POT ----
+READY=0
+for i in $(seq 1 30); do
+    echo "Waiting for POT server... ($i/30)"
+    if curl -sf --max-time 2 http://127.0.0.1:4416/ping > /dev/null 2>&1; then
+        echo "✅ POT server ready after ${i}s"
+        READY=1
+        break
+    fi
+    if ! kill -0 $POT_PID 2>/dev/null; then
+        echo "❌ POT server process died"
+        exit 1
+    fi
+    sleep 1
 done
 
-if [ "$ready" -ne 1 ]; then
-  echo "POT server failed health check"
-  cat "${POT_LOG}" || true
-  exit 1
+if [ "$READY" != "1" ]; then
+    echo "⚠️ POT not responding after 30s — continuing anyway"
 fi
 
-echo "Starting Gunicorn on 0.0.0.0:${PORT:-10000}..."
-gunicorn app:app \
-  --bind "0.0.0.0:${PORT:-10000}" \
-  --workers 1 \
-  --threads 2 \
-  --worker-class gthread \
-  --timeout 120 \
-  --graceful-timeout 30 \
-  --keep-alive 5 \
-  --max-requests 100 \
-  --max-requests-jitter 20 \
-  --access-logfile - \
-  --error-logfile - \
-  --log-level info &
-GUNICORN_PID=$!
+# ---- Cleanup handler ----
+cleanup() {
+    echo "🛑 Shutting down..."
+    kill $POT_PID 2>/dev/null || true
+    wait $POT_PID 2>/dev/null || true
+    exit 0
+}
+trap cleanup SIGTERM SIGINT
 
-wait "${GUNICORN_PID}"
-status=$?
-cleanup
-exit "$status"
+# ---- Start Gunicorn ----
+PORT="${PORT:-10000}"
+echo "🚀 Starting Gunicorn on 0.0.0.0:${PORT}..."
+
+exec gunicorn \
+    --bind "0.0.0.0:${PORT}" \
+    --workers 1 \
+    --threads 8 \
+    --worker-class gthread \
+    --timeout 300 \
+    --graceful-timeout 30 \
+    --keep-alive 5 \
+    --access-logfile - \
+    --error-logfile - \
+    --log-level info \
+    app:app
