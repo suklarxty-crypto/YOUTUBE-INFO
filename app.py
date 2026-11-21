@@ -1,6 +1,10 @@
-# app.py - YouTube Downloader API v29.3 (POT-Ready, Proxy-Fixed, Embedded Cookies)
+# app.py - YouTube Downloader API v29.4 (403 Forbidden Fix)
 # Made by @KINGFFAIAK47x · ANSH AFT
-# Compatible with: Dockerfile + bgutil POT server on :4416
+# FIX v29.4:
+#   - player_client = ["tv", "mweb", "web_safari"] (403 bypass)
+#   - player_skip = ["webpage", "configs"] (bot detection kam)
+#   - Download retry with client rotation
+# KEEP: POT server, embedded cookies, 10x proxy, cache, 2K verify
 
 import os
 import sys
@@ -22,7 +26,7 @@ from collections import defaultdict
 from flask import Flask, jsonify, request, g
 
 # ==============================================
-# 🔁 MULTI-PROXY ROTATION (v29.3 — port 80 + session suffix)
+# 🔁 MULTI-PROXY ROTATION
 # ==============================================
 
 _DEFAULT_PROXY_LIST = """p.webshare.io:80:obxhxmoa-1:2mxbvi0048se
@@ -305,7 +309,7 @@ def _cache_cleanup_loop():
 
 
 # ==============================================
-# 🍪 EMBEDDED COOKIES (Chrome JSON format)
+# 🍪 EMBEDDED COOKIES
 # ==============================================
 
 _EMBEDDED_COOKIES_JSON = '''[
@@ -1020,14 +1024,14 @@ def validate_quality(q):
 
 
 # ==============================================
-# YT-DLP OPTS (v29.3 — POT-Ready)
+# YT-DLP OPTS (v29.4 — 403 FIX)
 # ==============================================
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 
 def build_opts(download=False, quality="720p", use_cookies=True,
-               use_proxy=True, proxy=None):
+               use_proxy=True, proxy=None, client_override=None):
     quality = clamp_quality(quality)
     if quality == "best":
         fmt = f"bv*[height<={MAX_HEIGHT}]+ba/b[height<={MAX_HEIGHT}]/bv*+ba/b"
@@ -1040,15 +1044,20 @@ def build_opts(download=False, quality="720p", use_cookies=True,
 
     pot_available = check_pot_server()
 
-    # Base extractor_args
+    # 🎯 v29.4 403 FIX — modern clients that still serve DASH endpoints
+    if client_override:
+        players = [client_override]
+    else:
+        players = ["tv", "mweb", "web_safari"]
+
     extractor_args = {
         "youtube": {
-            # POT-era clients (2026)
-            "player_client": ["web_safari", "android_vr", "mweb", "web"],
+            "player_client": players,
+            # 🔥 Skip configs — bot detection kam hota hai
+            "player_skip": ["webpage", "configs"],
         },
     }
 
-    # 🔥 POT server integration
     if pot_available:
         extractor_args["youtubepot-bgutilhttp"] = {
             "base_url": POT_SERVER_URL,
@@ -1476,7 +1485,7 @@ def upload_multi(fp):
 
 
 # ==============================================
-# PROCESS VIDEO
+# PROCESS VIDEO (v29.4 — multi-client download retry)
 # ==============================================
 
 def process_video(url, quality="720p", video_id=None):
@@ -1536,39 +1545,66 @@ def process_video(url, quality="720p", video_id=None):
                 "credit": {"username": "@KINGFFAIAK47x", "made_by": "ANSH AFT"},
             }
 
+        # 🎯 DOWNLOAD with client rotation + proxy rotation
         dl_result = {"status": "pending"}
         fname = None
         t_dl = time.time()
         dl_error = None
+        client_attempts = []
 
-        for attempt in range(3):
-            if _SHUTTING_DOWN.is_set():
+        # Try each client with 2 proxies = 6 total attempts
+        client_rotation = ["tv", "mweb", "web_safari"]
+        for client in client_rotation:
+            if _SHUTTING_DOWN.is_set() or (fname and os.path.exists(fname)):
                 break
-            proxy = pick_proxy()
-            try:
-                opts = build_opts(download=True, quality=quality,
-                                  use_cookies=True, proxy=proxy)
-                with yt.YoutubeDL(opts) as ydl:
-                    dl_info = ydl.extract_info(url, download=True)
-                    fname = ydl.prepare_filename(dl_info)
-                    if not os.path.exists(fname):
-                        base = os.path.splitext(fname)[0]
-                        for ext in [".mp4", ".mkv", ".webm"]:
-                            if os.path.exists(base + ext):
-                                fname = base + ext
-                                break
-                if fname and os.path.exists(fname):
-                    report_proxy_result(proxy, True)
+            for attempt in range(2):
+                if _SHUTTING_DOWN.is_set():
                     break
-                report_proxy_result(proxy, False)
-                dl_error = "File not created"
-                fname = None
-            except Exception as ex:
-                report_proxy_result(proxy, False)
-                dl_error = str(ex)[:200]
-                log_event(f"⚠️ DL attempt {attempt+1}/3 failed: {dl_error}", "WARN")
-                fname = None
-                continue
+                proxy = pick_proxy()
+                try:
+                    opts = build_opts(
+                        download=True, quality=quality,
+                        use_cookies=True, proxy=proxy,
+                        client_override=client,
+                    )
+                    with yt.YoutubeDL(opts) as ydl:
+                        dl_info = ydl.extract_info(url, download=True)
+                        fname = ydl.prepare_filename(dl_info)
+                        if not os.path.exists(fname):
+                            base = os.path.splitext(fname)[0]
+                            for ext in [".mp4", ".mkv", ".webm"]:
+                                if os.path.exists(base + ext):
+                                    fname = base + ext
+                                    break
+                    if fname and os.path.exists(fname):
+                        report_proxy_result(proxy, True)
+                        client_attempts.append({
+                            "client": client, "proxy": _mask_proxy(proxy) if proxy else None,
+                            "status": "success",
+                        })
+                        log_event(f"✅ DL success: client={client}")
+                        break
+                    report_proxy_result(proxy, False)
+                    dl_error = "File not created"
+                    fname = None
+                    client_attempts.append({
+                        "client": client, "proxy": _mask_proxy(proxy) if proxy else None,
+                        "status": "file_missing",
+                    })
+                except Exception as ex:
+                    report_proxy_result(proxy, False)
+                    dl_error = str(ex)[:200]
+                    is_403 = "403" in dl_error or "Forbidden" in dl_error
+                    log_event(f"⚠️ DL fail [{client} try{attempt+1}]: {dl_error}", "WARN")
+                    client_attempts.append({
+                        "client": client, "proxy": _mask_proxy(proxy) if proxy else None,
+                        "status": "403" if is_403 else "error",
+                        "error": dl_error,
+                    })
+                    fname = None
+                    # 403 → try next client immediately
+                    if is_403:
+                        break
 
         t_dl_end = time.time()
 
@@ -1589,6 +1625,7 @@ def process_video(url, quality="720p", video_id=None):
                         "file_size": size, "file_size_formatted": fmt_size(size),
                         "download_time": f"{round(t_dl_end - t_dl, 2)}s",
                         "uploaded": False, "share_url": None, "upload_host": None,
+                        "client_attempts": client_attempts,
                     }
                 else:
                     log_event(f"✅ Quality verified: {verify.get('details', {}).get('actual_resolution', 'N/A')}")
@@ -1610,19 +1647,22 @@ def process_video(url, quality="720p", video_id=None):
                         "total_upload_time": f"{up_res.get('total_upload_time', 0)}s",
                         "verification": verify,
                         "uploaded": up_res.get("status") == "success",
+                        "client_attempts": client_attempts,
                     }
             else:
                 dl_result = {
                     "status": "failed",
                     "error": dl_error or "File not found after download",
                     "error_code": "DOWNLOAD_FAILED",
-                    "quality": quality, "uploaded": False, "proxies_tried": 3,
+                    "quality": quality, "uploaded": False,
+                    "client_attempts": client_attempts,
+                    "hint": "403 Forbidden — try /yt?no_cache=true or wait for cooldown",
                 }
         except Exception as ex:
             dl_result = {
                 "status": "failed", "error": str(ex)[:200],
                 "error_code": type(ex).__name__, "quality": quality,
-                "uploaded": False,
+                "uploaded": False, "client_attempts": client_attempts,
             }
         finally:
             try:
@@ -1679,7 +1719,7 @@ def process_video(url, quality="720p", video_id=None):
 def home():
     return jsonify({
         "service": "🎬 YouTube Downloader API",
-        "version": "29.3.0",
+        "version": "29.4.0",
         "rules": {"max_quality": MAX_QUALITY, "max_height": MAX_HEIGHT},
         "features": {
             "pot_server_integrated": True,
@@ -1688,6 +1728,7 @@ def home():
             "quality_verification": True,
             "multi_proxy_rotation": len(PROXY_POOL),
             "cookie_health_checker": True,
+            "403_bypass": "client_rotation + player_skip",
             "upload_hosts": ["tmpfiles.org", "catbox.moe", "litterbox.catbox.moe"],
         },
         "qualities": ["144p", "240p", "360p", "480p", "720p", "1080p", "1440p"],
@@ -1947,7 +1988,7 @@ def download_yt():
 @require_api_key
 def debug():
     return jsonify({
-        "status": "ok", "version": "29.3.0",
+        "status": "ok", "version": "29.4.0",
         "started_at": _STARTUP_TIME,
         "now": datetime.now().isoformat(),
         "pid": os.getpid(),
@@ -1955,6 +1996,8 @@ def debug():
             "max_quality": MAX_QUALITY, "max_height": MAX_HEIGHT,
             "allowed_hosts": ["tmpfiles.org", "catbox.moe", "litterbox.catbox.moe"],
             "quality_verification": "ENABLED",
+            "player_clients": ["tv", "mweb", "web_safari"],
+            "player_skip": ["webpage", "configs"],
         },
         "cache": get_cache_stats(),
         "proxies": get_proxy_stats(),
@@ -2007,12 +2050,14 @@ def he(e):
 # ==============================================
 
 log_event("=" * 60)
-log_event("YouTube Downloader API v29.3 STARTED")
+log_event("YouTube Downloader API v29.4 STARTED (403 Fix)")
 log_event(f"Rules: MAX_QUALITY={MAX_QUALITY}, MAX_HEIGHT={MAX_HEIGHT}")
 log_event(f"Proxies loaded: {len(PROXY_POOL)} (port 80, session suffixes)")
 log_event(f"Embedded cookies: {'YES' if _EMBEDDED_COOKIES_JSON.strip() else 'NO'}")
 log_event(f"Cookie file: {COOKIE_FILE}")
 log_event(f"POT server: {POT_SERVER_URL} → {'✅ UP' if check_pot_server() else '❌ DOWN'}")
+log_event(f"Player clients: tv, mweb, web_safari (403 bypass)")
+log_event(f"Player skip: webpage, configs (bot detect kam)")
 log_event(f"Cache: {'ON' if CACHE_ENABLED else 'OFF'} (TTL={CACHE_TTL}s)")
 log_event(f"Deno: {check_deno()}, Node: {check_node()}, FFmpeg: {check_ffmpeg()}, ffprobe: {check_ffprobe()}")
 log_event("=" * 60)
